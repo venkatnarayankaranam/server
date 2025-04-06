@@ -102,10 +102,10 @@ const outingRoutes = require('./routes/outings');
 const userRoutes = require('./routes/users');
 
 // Register routes
-app.use('/api/auth', require('./routes/auth'));
-app.use('/api/outings', outingRoutes);
-app.use('/api/dashboard', require('./routes/dashboard'));
-app.use('/api/users', userRoutes);
+app.use('/auth', require('./routes/auth'));
+app.use('/outings', outingRoutes);
+app.use('/dashboard', require('./routes/dashboard'));
+app.use('/users', userRoutes);
 
 // Add error handling for 404s
 app.use((req, res) => {
