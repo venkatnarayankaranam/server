@@ -6,7 +6,7 @@ let io;
 const init = (server) => {
   io = new Server(server, {
     cors: {
-      origin: ['https://outing-alpha.vercel.app', process.env.FRONTEND_URL, 'http://localhost:5173', 'http://localhost:3000', 'http://localhost:8080'],
+      origin: ['https://outingapplication.vercel.app/', process.env.FRONTEND_URL, 'http://localhost:5173', 'http://localhost:3000', 'http://localhost:8080'],
       methods: ['GET', 'POST'],
       credentials: true
     },

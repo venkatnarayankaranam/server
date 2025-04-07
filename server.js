@@ -64,7 +64,7 @@ connectWithRetry();
 
 // Update CORS configuration
 app.use(cors({
-  origin: ['https://outing-alpha.vercel.app', process.env.FRONTEND_URL, 'http://localhost:5173'],
+  origin: ['https://outingapplication.vercel.app', process.env.FRONTEND_URL, 'http://localhost:5173'],
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH'],
   allowedHeaders: ['Content-Type', 'Authorization'],
   credentials: true
