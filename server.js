@@ -78,6 +78,11 @@ app.use((req, res, next) => {
   next();
 });
 
+app.get('/', (req, res) => {
+  res.status(200).send('Outing Backend is running 🚀');
+});
+
+
 // Add detailed request logging before routes
 app.use((req, res, next) => {
   console.log(`[${new Date().toISOString()}] ${req.method} ${req.originalUrl}`, {
