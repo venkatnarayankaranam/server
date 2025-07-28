@@ -6,76 +6,124 @@ const QRCode = require('qrcode');
 exports.handleApproval = async (req, res) => {
   try {
     const { requestId } = req.params;
-    const { remarks = '' } = req.body;
+    const { remarks = '', approvalStatus } = req.body; // approvalStatus expected: 'approved' or 'rejected'
 
-    console.log('Processing approval:', {
-      requestId,
-      userRole: req.user.role,
-      currentTime: new Date().toISOString()
-    });
+    if (!['approved', 'rejected'].includes(approvalStatus)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid approval status. Must be "approved" or "rejected".'
+      });
+    }
 
     const request = await OutingRequest.findById(requestId)
       .populate('studentId', 'name email rollNumber phoneNumber');
 
     if (!request) {
-      return res.status(404).json({ success: false, message: 'Request not found' });
-    }
-
-    // Validate current level matches user role
-    if (request.currentLevel !== req.user.role) {
-      return res.status(400).json({
-        success: false,
-        message: `Invalid approval sequence. Current level is ${request.currentLevel}, but got approval from ${req.user.role}`
+      return res.status(404).json({ 
+        success: false, 
+        message: 'Request not found' 
       });
     }
 
-    // Create approval entry
-    const approvalEntry = {
-      level: req.user.role,
-      status: 'approved',
-      timestamp: new Date(),
-      remarks: remarks || '',
-      approvedBy: req.user.email,
-      approverModel: 'Admin',
-      approverInfo: {
-        email: req.user.email,
-        role: req.user.role
-      }
-    };
+    const userRole = req.user.role;
 
-    // Add to approval flow
-    request.approvalFlow.push(approvalEntry);
-
-    // Update approval status
-    request[`${req.user.role.replace('-', '')}Approval`] = 'approved';
-
-    // Move to next level
-    const workflow = {
-      'floor-incharge': 'hostel-incharge',
-      'hostel-incharge': 'warden',
-      'warden': 'completed'
-    };
-
-    request.currentLevel = workflow[req.user.role];
-
-    // Handle completion
-    if (request.currentLevel === 'completed') {
-      request.status = 'approved';
-      await request.generateQRCodes();
+    // Block main gate approval
+    if (userRole === 'gate' || userRole === 'warden') {
+      return res.status(403).json({
+        success: false,
+        message: 'Main Gate or Warden cannot approve requests.'
+      });
     }
 
-    // Save with validation
+    // Validate current level matches user role
+    if (request.currentLevel !== userRole) {
+      return res.status(400).json({
+        success: false,
+        message: `Invalid approval sequence. Expected ${request.currentLevel}, got ${userRole}`
+      });
+    }
+
+    // Handle approval or rejection logic
+    if (userRole === 'floor-incharge') {
+      if (approvalStatus === 'approved') {
+        request.approvalFlags.floorIncharge.isApproved = true;
+        request.approvalFlags.floorIncharge.timestamp = new Date();
+        request.approvalFlags.floorIncharge.remarks = remarks;
+        request.currentLevel = 'hostel-incharge';
+        // Do not change request.status yet
+      } else {
+        // Rejected by floor incharge
+        request.approvalFlags.floorIncharge.isApproved = false;
+        request.approvalFlags.floorIncharge.timestamp = new Date();
+        request.approvalFlags.floorIncharge.remarks = remarks;
+        request.status = 'denied';
+        request.currentLevel = 'completed';
+      }
+    } else if (userRole === 'hostel-incharge') {
+      // Can only approve if floorIncharge approved
+      if (!request.approvalFlags.floorIncharge.isApproved) {
+        return res.status(400).json({
+          success: false,
+          message: 'Floor Incharge approval required before Hostel Incharge approval.'
+        });
+      }
+
+      if (approvalStatus === 'approved') {
+        request.approvalFlags.hostelIncharge.isApproved = true;
+        request.approvalFlags.hostelIncharge.timestamp = new Date();
+        request.approvalFlags.hostelIncharge.remarks = remarks;
+        // If both approved, mark request approved
+    if (request.approvalFlags.floorIncharge.isApproved && request.approvalFlags.hostelIncharge.isApproved) {
+      request.status = 'approved';
+      request.currentLevel = 'completed';
+
+      // Generate outgoing QR code on final approval
+      const qrPayload = {
+        requestId: request._id.toString(),
+        studentId: request.studentId._id.toString(),
+        type: 'outgoing',
+        generatedAt: new Date()
+      };
+      request.qrCode.outgoing.data = await QRCode.toDataURL(JSON.stringify(qrPayload));
+      request.qrCode.outgoing.generatedAt = new Date();
+    } else {
+      // Should not happen, but keep currentLevel as hostel-incharge
+      request.currentLevel = 'hostel-incharge';
+    }
+      } else {
+        // Rejected by hostel incharge
+        request.approvalFlags.hostelIncharge.isApproved = false;
+        request.approvalFlags.hostelIncharge.timestamp = new Date();
+        request.approvalFlags.hostelIncharge.remarks = remarks;
+        request.status = 'denied';
+        request.currentLevel = 'completed';
+      }
+    }
+
+    // Add to approval flow
+    request.approvalFlow.push({
+      level: userRole,
+      status: approvalStatus,
+      timestamp: new Date(),
+      remarks,
+      approvedBy: req.user.email,
+      approverInfo: {
+        email: req.user.email,
+        role: userRole
+      }
+    });
+
     await request.save();
 
-    // Return success response
+    // Send response
     res.json({
       success: true,
-      message: 'Request approved successfully',
+      message: 'Approval processed successfully',
       request: {
         id: request._id,
         status: request.status,
         currentLevel: request.currentLevel,
-        approvalFlow: request.approvalFlow
+        approvalFlags: request.approvalFlags
       }
     });
 
@@ -83,7 +131,7 @@ exports.handleApproval = async (req, res) => {
     console.error('Approval error:', error);
     res.status(400).json({
       success: false,
-      message: error.message,
+      message: error.message
     });
   }
 };
@@ -196,27 +244,62 @@ exports.getDashboardData = async (req, res) => {
 
 exports.verifyQRCode = async (req, res) => {
   try {
-    const { qrData, type } = req.body;
+    const { qrData } = req.body;
     const data = JSON.parse(qrData);
-    
-    const request = await OutingRequest.findById(data.requestId)
-      .populate('studentId', 'name email rollNumber phoneNumber');
 
-    if (!request || request.currentLevel !== 'approved') {
+    const request = await OutingRequest.findById(data.requestId)
+      .populate('studentId', 'name email rollNumber phoneNumber parentPhoneNumber outingTime returnTime');
+
+    if (!request) {
       return res.status(400).json({
         success: false,
-        message: 'Invalid or unauthorized QR code'
+        message: 'Invalid QR code'
       });
     }
 
-    // Handle check-in/check-out
     const now = new Date();
-    if (type === 'outgoing') {
+
+    if (data.type === 'outgoing') {
+      if (!request.qrCode.outgoing.data || request.qrCode.outgoing.data !== qrData) {
+        return res.status(400).json({
+          success: false,
+          message: 'Invalid or expired outgoing QR code'
+        });
+      }
+
+      // Mark outgoing QR as used (make invisible)
+      request.qrCode.outgoing.data = null;
       request.checkOut = {
         time: now,
         scannedBy: req.user.id
       };
-    } else {
+
+      // Generate incoming QR 30 minutes before return time
+      const incomingQRTime = new Date(request.returnDate);
+      const [hours, minutes] = request.returnTime.split(':').map(Number);
+      incomingQRTime.setHours(hours, minutes - 30, 0, 0);
+
+      if (now >= incomingQRTime) {
+        const incomingPayload = {
+          requestId: request._id.toString(),
+          studentId: request.studentId._id.toString(),
+          type: 'incoming',
+          generatedAt: now
+        };
+        request.qrCode.incoming.data = await QRCode.toDataURL(JSON.stringify(incomingPayload));
+        request.qrCode.incoming.generatedAt = now;
+      }
+
+    } else if (data.type === 'incoming') {
+      if (!request.qrCode.incoming.data || request.qrCode.incoming.data !== qrData) {
+        return res.status(400).json({
+          success: false,
+          message: 'Invalid or expired incoming QR code'
+        });
+      }
+
+      // Mark incoming QR as used (make invisible)
+      request.qrCode.incoming.data = null;
       request.checkIn = {
         time: now,
         scannedBy: req.user.id
@@ -225,10 +308,15 @@ exports.verifyQRCode = async (req, res) => {
       // Check if return is within 30 minutes of scheduled time
       const scheduledReturn = new Date(`${request.returnDate}T${request.returnTime}`);
       const timeDiff = Math.abs(scheduledReturn - now) / (1000 * 60); // difference in minutes
-      
+
       if (timeDiff > 30) {
         request.status = 'late-return';
       }
+    } else {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid QR code type'
+      });
     }
 
     await request.save();
@@ -236,7 +324,7 @@ exports.verifyQRCode = async (req, res) => {
     // Emit real-time update
     socketIO.getIO().emit('qr-scan', {
       requestId: request._id,
-      type,
+      type: data.type,
       timestamp: now
     });
 

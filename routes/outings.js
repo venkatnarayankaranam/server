@@ -192,7 +192,7 @@ router.get('/approved-students/warden', auth, checkRole(['warden']), async (req,
   try {
     const approvedRequests = await OutingRequest.find({
       status: 'approved',
-      wardenApproval: 'approved'
+      'approvalFlags.warden.isApproved': true
     })
     .populate('studentId', 'name email rollNumber hostelBlock floor roomNumber phoneNumber parentPhoneNumber branch semester')
     .sort({ outingDate: -1 });
@@ -220,6 +220,42 @@ router.get('/approved-students/warden', auth, checkRole(['warden']), async (req,
   }
 });
 
+// Get approved students for hostel incharge
+router.get('/approved-students/hostel-incharge', auth, checkRole(['hostel-incharge']), async (req, res) => {
+  try {
+    const { assignedBlocks } = req.user;
+
+    const approvedRequests = await OutingRequest.find({
+      hostelBlock: { $in: assignedBlocks },
+      status: 'approved',
+      'approvalFlags.hostelIncharge.isApproved': true
+    })
+    .populate('studentId', 'name email rollNumber hostelBlock floor roomNumber phoneNumber parentPhoneNumber branch semester')
+    .sort({ outingDate: -1 });
+
+    const uniqueStudents = Array.from(new Map(
+      approvedRequests.map(request => [
+        request.studentId._id.toString(),
+        {
+          ...request.studentId.toObject(),
+          outingTime: request.outingTime,
+          returnTime: request.returnTime,
+          outingDate: request.outingDate,
+          requestId: request._id
+        }
+      ])
+    ).values());
+
+    res.json({
+      success: true,
+      students: uniqueStudents
+    });
+  } catch (error) {
+    console.error('Error fetching hostel incharge approved students:', error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
 // Handle request actions (approve/deny)
 router.patch('/floor-incharge/request/:requestId/:action', auth, checkRole(['floor-incharge']), async (req, res) => {
   try {
@@ -229,139 +265,91 @@ router.patch('/floor-incharge/request/:requestId/:action', auth, checkRole(['flo
     console.log('Processing floor-incharge request:', {
       requestId,
       action,
-      userDetails: {
-        id: req.user.id,
-        email: req.user.email,
-        role: req.user.role,
-        assignedBlock: req.user.assignedBlock,
-        assignedFloor: req.user.assignedFloor
-      }
+      userDetails: req.user
     });
 
-    // Validate action parameter
+    // Validate action
     if (!['approve', 'deny'].includes(action)) {
       return res.status(400).json({
         success: false,
-        message: 'Invalid action. Must be either "approve" or "deny"'
+        message: 'Invalid action'
       });
     }
 
-    const request = await OutingRequest.findById(requestId);
+    const request = await OutingRequest.findById(requestId)
+      .populate('studentId', 'name email rollNumber hostelBlock floor roomNumber phoneNumber parentPhoneNumber');
+
     if (!request) {
       return res.status(404).json({
         success: false,
-        message: 'Request not found',
-        requestId
+        message: 'Request not found'
       });
     }
-
-    // Load student details
-    await request.populate('studentId', 'name email rollNumber hostelBlock floor roomNumber phoneNumber parentPhoneNumber');
 
     // Validate request state
-    if (request.status !== 'pending') {
+    if (request.status !== 'pending' || request.currentLevel !== 'floor-incharge') {
       return res.status(400).json({
         success: false,
-        message: `Cannot ${action} request that is not pending`,
-        currentStatus: request.status
+        message: 'Invalid request state for approval',
+        currentStatus: request.status,
+        currentLevel: request.currentLevel
       });
     }
 
-    const status = action === 'approve' ? 'approved' : 'denied';
+    // Update approval state
+    request.approvalFlags.floorIncharge = {
+      isApproved: action === 'approve',
+      timestamp: new Date(),
+      remarks: comments
+    };
 
-    // Initialize approval flow array if not exists
-    if (!Array.isArray(request.approvalFlow)) {
-      request.approvalFlow = [];
-    }
-
-    // Create approval entry
-    const approvalEntry = {
+    // Add to approval flow
+    request.approvalFlow.push({
       level: 'floor-incharge',
-      status: status,
+      status: action === 'approve' ? 'approved' : 'denied',
       timestamp: new Date(),
       remarks: comments,
       approvedBy: req.user.email,
-      approverModel: 'Admin',
       approverInfo: {
         email: req.user.email,
         role: 'floor-incharge'
       }
-    };
+    });
 
-    // Add to approval flow
-    request.approvalFlow.push(approvalEntry);
-
-    // Update status fields
-    request.status = status;
-    request.floorInchargeApproval = status;
-    request.approvalTimestamps.floorIncharge = new Date();
-    request.lastModifiedBy = req.user.email;
-
-    // Move to next level if approved
-    if (status === 'approved') {
-      await request.moveToNextLevel();
+    if (action === 'approve') {
+      request.moveToNextLevel();
     } else {
+      request.status = 'denied';
       request.currentLevel = 'completed';
     }
 
-    // Save the updated request
     const savedRequest = await request.save();
-    
-    // Emit socket update
-    try {
-      const room = `${request.hostelBlock}-${request.floor}`;
-      socketIO.getIO().to(room).emit('request-update', {
+
+    // Emit socket event
+    const io = req.app.get('socketio');
+    if (io) {
+      io.emit('request-update', {
         type: 'status-change',
-        request: {
-          id: request._id,
-          status: request.status,
-          studentName: request.studentId.name,
-          rollNumber: request.studentId.rollNumber,
-          outingDate: request.outingDate,
-          outingTime: request.outingTime,
-          returnTime: request.returnTime,
-          purpose: request.purpose,
-          hostelBlock: request.hostelBlock,
-          floor: request.floor,
-          roomNo: request.studentId.roomNumber,
-          email: request.studentId.email,
-          phoneNumber: request.studentId.phoneNumber,
-          parentPhoneNumber: request.studentId.parentPhoneNumber
-        }
+        request: savedRequest
       });
-    } catch (socketError) {
-      console.error('Socket emission error:', socketError);
     }
 
     res.json({
       success: true,
-      message: `Request ${action}ed successfully`,
+      message: `Request ${action}d successfully`,
       request: {
         id: savedRequest._id,
         status: savedRequest.status,
-        currentLevel: savedRequest.currentLevel,
-        studentName: savedRequest.studentId.name,
-        rollNumber: savedRequest.studentId.rollNumber
+        currentLevel: savedRequest.currentLevel
       }
     });
 
   } catch (error) {
-    console.error('Error updating request:', {
-      error: error.message,
-      stack: error.stack,
-      requestId: req.params.requestId,
-      action: req.params.action
-    });
-
+    console.error('Approval error:', error);
     res.status(500).json({
       success: false,
       message: 'Failed to process request',
-      error: process.env.NODE_ENV === 'development' ? error.message : 'Internal server error',
-      details: process.env.NODE_ENV === 'development' ? {
-        name: error.name,
-        message: error.message,
-        stack: error.stack
-      } : undefined
+      error: error.message
     });
   }
 });
@@ -371,77 +359,60 @@ router.post('/requests/submit', auth, checkRole(['student']), async (req, res) =
   try {
     const student = await User.findById(req.user.id);
     if (!student) {
-      return res.status(404).json({ success: false, message: 'Student not found' });
+      return res.status(404).json({ 
+        success: false, 
+        message: 'Student not found' 
+      });
     }
 
-    // Normalize floor format
-    const normalizedFloor = OutingRequest.normalizeFloor(student.floor);
+    // Validate required fields
+    const { outingDate, outTime, returnTime, purpose, parentContact } = req.body;
+    
+    if (!outingDate || !outTime || !returnTime || !purpose) {
+      return res.status(400).json({
+        success: false,
+        message: 'Missing required fields',
+        required: ['outingDate', 'outTime', 'returnTime', 'purpose']
+      });
+    }
 
-    const newRequest = new OutingRequest({
-      studentId: student._id,
-      outingDate: new Date(req.body.outingDate),
-      outingTime: req.body.outTime,
-      returnTime: req.body.returnTime,
-      returnDate: new Date(req.body.returnDate || req.body.outingDate),
-      purpose: req.body.purpose,
-      parentPhoneNumber: req.body.parentContact || student.parentPhoneNumber,
-      hostelBlock: student.hostelBlock,
-      floor: normalizedFloor,
-      status: 'pending',
-      currentLevel: 'floor-incharge',
-    });
-
-    await newRequest.save();
-
-    console.log('New outing request created:', {
-      studentId: student._id,
-      hostelBlock: newRequest.hostelBlock,
-      floor: newRequest.floor,
-      status: newRequest.status,
-    });
-
-    // Emit new request event with error handling
     try {
-      const room = `${newRequest.hostelBlock}-${newRequest.floor}`;
-      socketIO.getIO().to(room).emit('new-request', {
-        type: 'new-request',
+      const newRequest = new OutingRequest({
+        studentId: student._id,
+        outingDate: new Date(outingDate),
+        outingTime: outTime,
+        returnTime: returnTime,
+        purpose: purpose,
+        parentPhoneNumber: parentContact || student.parentPhoneNumber,
+        hostelBlock: student.hostelBlock,
+        floor: student.floor
+      });
+
+      await newRequest.save();
+
+      res.status(201).json({
+        success: true,
         request: {
           id: newRequest._id,
-          studentId: student._id,
-          studentName: student.name,
-          rollNumber: student.rollNumber,
           outingDate: newRequest.outingDate,
           outingTime: newRequest.outingTime,
           returnTime: newRequest.returnTime,
-          purpose: newRequest.purpose,
           status: newRequest.status,
-          hostelBlock: newRequest.hostelBlock,
-          floor: newRequest.floor,
-          roomNo: student.roomNumber,
-          email: student.email,
-          phoneNumber: student.phoneNumber,
-          parentPhoneNumber: student.parentPhoneNumber
+          currentLevel: newRequest.currentLevel
         }
       });
-    } catch (socketError) {
-      console.error('Socket emission error:', socketError);
-      // Continue with the response even if socket emission fails
+    } catch (saveError) {
+      console.error('Error saving request:', saveError);
+      throw new Error(`Failed to save request: ${saveError.message}`);
     }
 
-    res.status(201).json({
-      success: true,
-      request: {
-        id: newRequest._id,
-        date: newRequest.outingDate,
-        outTime: newRequest.outingTime,
-        inTime: newRequest.returnTime,
-        status: newRequest.status,
-        purpose: newRequest.purpose,
-      },
-    });
   } catch (error) {
-    console.error('Error creating request:', error);
-    res.status(500).json({ success: false, message: error.message });
+    console.error('Request submission error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to submit outing request',
+      error: error.message
+    });
   }
 });
 
@@ -663,9 +634,9 @@ router.get('/dashboard/hostel-incharge', auth, checkRole(['hostel-incharge']), a
       purpose: request.purpose,
       status: request.status,
       currentLevel: request.currentLevel,
-      floorInchargeApproval: request.floorInchargeApproval,
-      hostelInchargeApproval: request.hostelInchargeApproval,
-      wardenApproval: request.wardenApproval,
+      floorInchargeApproval: request.approvalFlags?.floorIncharge?.isApproved ? 'approved' : 'pending',
+      hostelInchargeApproval: request.approvalFlags?.hostelIncharge?.isApproved ? 'approved' : 'pending',
+      wardenApproval: request.approvalFlags?.warden?.isApproved ? 'approved' : 'pending',
       approvalFlow: request.approvalFlow,
       parentPhoneNumber: request.parentPhoneNumber,
       createdAt: request.createdAt
@@ -678,20 +649,22 @@ router.get('/dashboard/hostel-incharge', auth, checkRole(['hostel-incharge']), a
       }),
       approved: await OutingRequest.countDocuments({
         hostelBlock: { $in: assignedBlocks },
-        hostelInchargeApproval: 'approved'
+        'approvalFlags.hostelIncharge.isApproved': true
       }),
       denied: await OutingRequest.countDocuments({
         hostelBlock: { $in: assignedBlocks },
-        hostelInchargeApproval: 'denied'
+        status: 'denied'
       }),
       awaitingApproval: await OutingRequest.countDocuments({
         hostelBlock: { $in: assignedBlocks },
-        floorInchargeApproval: 'approved',
-        hostelInchargeApproval: 'pending'
+        'approvalFlags.floorIncharge.isApproved': true,
+        'approvalFlags.hostelIncharge.isApproved': false,
+        currentLevel: 'hostel-incharge'
       }),
       pendingFloorIncharge: await OutingRequest.countDocuments({
         hostelBlock: { $in: assignedBlocks },
-        floorInchargeApproval: 'pending'
+        'approvalFlags.floorIncharge.isApproved': false,
+        currentLevel: 'floor-incharge'
       })
     };
 
@@ -714,21 +687,22 @@ router.get('/dashboard/warden', auth, checkRole(['warden']), async (req, res) =>
     const [pendingRequests, stats] = await Promise.all([
       OutingRequest.find({
         currentLevel: 'warden',
-        hostelInchargeApproval: 'approved',
-        wardenApproval: 'pending'
+        'approvalFlags.hostelIncharge.isApproved': true,
+        'approvalFlags.warden.isApproved': false
       }).populate('studentId', 'name email rollNumber phoneNumber hostelBlock floor roomNumber parentPhoneNumber'),
 
       {
         pending: await OutingRequest.countDocuments({
           currentLevel: 'warden',
-          hostelInchargeApproval: 'approved',
-          wardenApproval: 'pending'
+          'approvalFlags.hostelIncharge.isApproved': true,
+          'approvalFlags.warden.isApproved': false
         }),
         approved: await OutingRequest.countDocuments({
-          wardenApproval: 'approved'
+          'approvalFlags.warden.isApproved': true
         }),
         denied: await OutingRequest.countDocuments({
-          wardenApproval: 'denied'
+          status: 'denied',
+          currentLevel: 'completed'
         })
       }
     ]);
@@ -771,7 +745,7 @@ router.get('/dashboard/warden', auth, checkRole(['warden']), async (req, res) =>
 router.patch('/warden/approve/:requestId', auth, checkRole(['warden']), async (req, res) => {
   try {
     const request = await OutingRequest.findById(req.params.requestId)
-      .populate('studentId', 'name email rollNumber hostelBlock floor roomNumber');
+      .populate('studentId', 'name email rollNumber hostelBlock floor roomNumber phoneNumber parentPhoneNumber');
 
     if (!request) {
       return res.status(404).json({
@@ -781,23 +755,54 @@ router.patch('/warden/approve/:requestId', auth, checkRole(['warden']), async (r
     }
 
     // Check current status
-    if (request.wardenApproval === 'approved') {
+    if (request.approvalFlags?.warden?.isApproved) {
       return res.status(400).json({
         success: false,
         message: 'Request is already approved'
       });
     }
 
-    // Update approval status
-    request.wardenApproval = 'approved';
-    request.status = 'approved';
-    request.currentLevel = 'completed';
-    request.lastModifiedBy = req.user.email;
-    request.approvalTimestamps = {
-      ...request.approvalTimestamps,
-      warden: new Date()
+    // Update approval status using approvalFlags
+    if (!request.approvalFlags) {
+      request.approvalFlags = {
+        floorIncharge: { isApproved: false },
+        hostelIncharge: { isApproved: false },
+        warden: { isApproved: false }
+      };
+    }
+
+    // Update warden approval
+    request.approvalFlags.warden = {
+      isApproved: true,
+      approvedBy: req.user.email,
+      approvedAt: new Date(),
+      timestamp: new Date(), // Add timestamp for QR generation
+      remarks: req.body.comments || 'Approved by Warden'
     };
 
+    // Update main status fields
+    request.status = 'approved';
+    request.currentLevel = 'completed';
+
+    // Generate outgoing QR code with student details before saving
+    try {
+      console.log('🔧 Starting QR generation for request:', request._id);
+      console.log('🔧 Student data:', {
+        id: request.studentId?._id,
+        name: request.studentId?.name,
+        rollNumber: request.studentId?.rollNumber
+      });
+      
+      await request.generateOutgoingQR();
+      console.log(`✅ Outgoing QR generated for student: ${request.studentId?.name || 'Unknown'}`);
+    } catch (error) {
+      console.error('❌ Outgoing QR Code generation error:', error);
+      console.error('❌ Error details:', error.message);
+      console.error('❌ Error stack:', error.stack);
+      // Continue even if QR generation fails - don't break the approval process
+    }
+
+    // Save once after all changes
     await request.save();
 
     // Emit socket event if needed
@@ -826,6 +831,81 @@ router.patch('/warden/approve/:requestId', auth, checkRole(['warden']), async (r
     res.status(500).json({
       success: false,
       message: 'Failed to approve request',
+      error: error.message
+    });
+  }
+});
+
+// Warden deny endpoint
+router.post('/warden/deny/:requestId', auth, checkRole(['warden']), async (req, res) => {
+  try {
+    const request = await OutingRequest.findById(req.params.requestId)
+      .populate('studentId', 'name email rollNumber hostelBlock floor roomNumber');
+
+    if (!request) {
+      return res.status(404).json({
+        success: false,
+        message: 'Request not found'
+      });
+    }
+
+    // Check current status
+    if (request.status === 'denied') {
+      return res.status(400).json({
+        success: false,
+        message: 'Request is already denied'
+      });
+    }
+
+    // Update denial status using approvalFlags
+    if (!request.approvalFlags) {
+      request.approvalFlags = {
+        floorIncharge: { isApproved: false },
+        hostelIncharge: { isApproved: false },
+        warden: { isApproved: false }
+      };
+    }
+
+    // Update warden denial
+    request.approvalFlags.warden = {
+      isApproved: false,
+      approvedBy: req.user.email,
+      approvedAt: new Date(),
+      remarks: req.body.comments || 'Denied by Warden'
+    };
+
+    // Update main status fields
+    request.status = 'denied';
+    request.currentLevel = 'completed';
+
+    await request.save();
+
+    // Emit socket event if needed
+    const io = req.app.get('io');
+    if (io) {
+      io.emit('warden-request-updated', {
+        requestId: request._id,
+        status: request.status,
+        level: 'warden'
+      });
+    }
+
+    res.json({
+      success: true,
+      message: 'Request denied successfully',
+      request: {
+        id: request._id,
+        status: request.status,
+        studentName: request.studentId.name,
+        currentLevel: request.currentLevel
+      }
+    });
+
+  } catch (error) {
+    console.error('Warden denial error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to deny request',
       error: error.message
     });
   }

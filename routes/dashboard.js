@@ -12,7 +12,7 @@ router.get('/student/requests', auth, checkRole(['student']), async (req, res) =
     const [requests, stats] = await Promise.all([
       OutingRequest.find({ studentId: req.user.id })
         .sort({ createdAt: -1 })
-        .select('outingDate outingTime returnTime status purpose createdAt')
+        .select('outingDate outingTime returnTime status purpose createdAt currentLevel approvalFlags approvalFlow qrCode')
         .lean(),
       {
         pending: await OutingRequest.countDocuments({ 
@@ -41,7 +41,15 @@ router.get('/student/requests', auth, checkRole(['student']), async (req, res) =
         inTime: req.returnTime,
         status: req.status,
         purpose: req.purpose,
-        createdAt: req.createdAt
+        createdAt: req.createdAt,
+        currentLevel: req.currentLevel,
+        approvalStatus: {
+          floorIncharge: req.approvalFlags?.floorIncharge?.isApproved ? 'approved' : 'waiting',
+          hostelIncharge: req.approvalFlags?.hostelIncharge?.isApproved ? 'approved' : 'waiting',
+          warden: req.approvalFlags?.warden?.isApproved ? 'approved' : 'waiting'
+        },
+        qrCode: req.qrCode || null,
+        isFullyApproved: req.status === 'approved' && req.currentLevel === 'completed'
       })),
       stats 
     });
@@ -116,14 +124,13 @@ router.get('/floor-incharge/requests', auth, checkRole(['floor-incharge']), asyn
       approved: await OutingRequest.countDocuments({
         hostelBlock: req.user.assignedBlock,
         floor: req.user.assignedFloor,
-        'workflow.level': 'floor-incharge',
-        'workflow.status': 'approved'
+        'approvalFlags.floorIncharge.isApproved': true
       }),
       denied: await OutingRequest.countDocuments({
         hostelBlock: req.user.assignedBlock,
         floor: req.user.assignedFloor,
-        'workflow.level': 'floor-incharge',
-        'workflow.status': 'denied'
+        'approvalFlow.level': 'floor-incharge',
+        'approvalFlow.status': 'denied'
       })
     };
 
@@ -132,6 +139,94 @@ router.get('/floor-incharge/requests', auth, checkRole(['floor-incharge']), asyn
       requests, 
       stats,
       totalStudents 
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+// Hostel Incharge Dashboard Routes
+router.get('/hostel-incharge/requests', auth, checkRole(['hostel-incharge']), async (req, res) => {
+  try {
+    const requests = await OutingRequest.find({
+      currentLevel: 'hostel-incharge',
+      hostelBlock: { $in: req.user.assignedBlocks }
+    }).populate('studentId', 'name rollNumber roomNumber floor hostelBlock');
+
+    // Get statistics
+    const stats = {
+      totalStudents: await User.countDocuments({
+        role: 'student',
+        hostelBlock: { $in: req.user.assignedBlocks }
+      }),
+      pending: await OutingRequest.countDocuments({
+        currentLevel: 'hostel-incharge',
+        hostelBlock: { $in: req.user.assignedBlocks },
+        status: 'pending'
+      }),
+      approved: await OutingRequest.countDocuments({
+        hostelBlock: { $in: req.user.assignedBlocks },
+        'approvalFlags.hostelIncharge.isApproved': true
+      }),
+      denied: await OutingRequest.countDocuments({
+        hostelBlock: { $in: req.user.assignedBlocks },
+        status: 'denied',
+        currentLevel: 'completed'
+      })
+    };
+
+    res.json({
+      success: true,
+      requests,
+      stats
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+// Warden Dashboard Routes
+router.get('/warden/requests', auth, checkRole(['warden']), async (req, res) => {
+  try {
+    const [requests, students, outingsToday] = await Promise.all([
+      OutingRequest.find({
+        currentLevel: 'warden',
+        'approvalFlags.hostelIncharge.isApproved': true
+      }).populate('studentId', 'name rollNumber hostelBlock floor roomNumber'),
+      
+      User.countDocuments({ role: 'student' }),
+      
+      OutingRequest.countDocuments({
+        status: 'approved',
+        outingDate: {
+          $gte: new Date().setHours(0, 0, 0, 0),
+          $lt: new Date().setHours(23, 59, 59, 999)
+        }
+      })
+    ]);
+
+    // Get approval statistics
+    const stats = {
+      totalStudents: students,
+      outingsToday,
+      pending: await OutingRequest.countDocuments({
+        currentLevel: 'warden',
+        'approvalFlags.hostelIncharge.isApproved': true
+      }),
+      approved: await OutingRequest.countDocuments({
+        status: 'approved',
+        currentLevel: 'completed'
+      }),
+      denied: await OutingRequest.countDocuments({
+        status: 'denied',
+        currentLevel: 'completed'
+      })
+    };
+
+    res.json({
+      success: true,
+      requests,
+      stats
     });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
@@ -160,6 +255,123 @@ router.post('/request/:requestId/action', auth, async (req, res) => {
     if (action === 'approve') {
       request.moveToNextLevel();
     } else if (action === 'deny') {
+      request.status = 'denied';
+      request.currentLevel = 'completed';
+    }
+
+    await request.save();
+
+    res.json({
+      success: true,
+      message: `Request ${action}d successfully`,
+      request: {
+        id: request._id,
+        status: request.status,
+        currentLevel: request.currentLevel
+      }
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+// Handle hostel incharge approval/denial
+router.post('/hostel-incharge/request/:requestId/action', auth, checkRole(['hostel-incharge']), async (req, res) => {
+  try {
+    const { requestId } = req.params;
+    const { action, comments } = req.body;
+
+    const request = await OutingRequest.findById(requestId);
+    if (!request) {
+      return res.status(404).json({ success: false, message: 'Request not found' });
+    }
+
+    if (request.currentLevel !== 'hostel-incharge') {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid request state for hostel incharge action'
+      });
+    }
+
+    request.approvalFlow.push({
+      level: 'hostel-incharge',
+      status: action,
+      timestamp: new Date(),
+      remarks: comments,
+      approvedBy: req.user.email,
+      approverInfo: {
+        email: req.user.email,
+        role: 'hostel-incharge'
+      }
+    });
+
+    if (action === 'approve') {
+      request.approvalFlags.hostelIncharge = {
+        isApproved: true,
+        timestamp: new Date(),
+        remarks: comments
+      };
+      await request.moveToNextLevel();
+    } else {
+      request.status = 'denied';
+      request.currentLevel = 'completed';
+    }
+
+    await request.save();
+
+    res.json({
+      success: true,
+      message: `Request ${action}d successfully`,
+      request: {
+        id: request._id,
+        status: request.status,
+        currentLevel: request.currentLevel
+      }
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+// Handle warden approval/denial
+router.post('/warden/request/:requestId/action', auth, checkRole(['warden']), async (req, res) => {
+  try {
+    const { requestId } = req.params;
+    const { action, comments } = req.body;
+
+    const request = await OutingRequest.findById(requestId);
+    if (!request) {
+      return res.status(404).json({ success: false, message: 'Request not found' });
+    }
+
+    if (request.currentLevel !== 'warden') {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid request state for warden action'
+      });
+    }
+
+    request.approvalFlow.push({
+      level: 'warden',
+      status: action,
+      timestamp: new Date(),
+      remarks: comments,
+      approvedBy: req.user.email,
+      approverInfo: {
+        email: req.user.email,
+        role: 'warden'
+      }
+    });
+
+    if (action === 'approve') {
+      request.approvalFlags.warden = {
+        isApproved: true,
+        timestamp: new Date(),
+        remarks: comments
+      };
+      request.status = 'approved';
+      request.currentLevel = 'completed';
+    } else {
       request.status = 'denied';
       request.currentLevel = 'completed';
     }

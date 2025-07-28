@@ -50,6 +50,9 @@ router.post('/register', async (req, res) => {
 
     // Format floor value
     const formattedFloor = User.formatFloor(floor);
+    
+    // Format hostel block (add -Block if not present)
+    const formattedHostelBlock = hostelBlock?.includes('-Block') ? hostelBlock : `${hostelBlock}-Block`;
 
     const salt = await bcrypt.genSalt(10);
     const hashedPassword = await bcrypt.hash(password, salt);
@@ -61,11 +64,11 @@ router.post('/register', async (req, res) => {
       rollNumber,
       phoneNumber,
       parentPhoneNumber,
-      hostelBlock,
+      hostelBlock: formattedHostelBlock,
       floor: formattedFloor, // Use formatted floor value
       roomNumber,
-      branch,
-      semester,
+      branch: branch || 'Computer Science', // Default branch
+      semester: semester || 1, // Default semester
       role: 'student',
     });
 

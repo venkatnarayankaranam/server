@@ -1,5 +1,6 @@
 const jwt = require('jsonwebtoken');
 const User = require('../models/User');
+const OutingRequest = require('../models/OutingRequest');
 
 const auth = async (req, res, next) => {
   try {
@@ -11,7 +12,6 @@ const auth = async (req, res, next) => {
         message: 'No auth token found',
       });
     }
-
     // Clean the token
     token = token.replace('Bearer ', '').trim();
 
@@ -26,6 +26,7 @@ const auth = async (req, res, next) => {
       if (decoded.exp && decoded.exp < Date.now() / 1000) {
         throw new Error('Token expired');
       }
+      
 
       if (decoded.role === 'hostel-incharge') {
         req.user = {
@@ -50,11 +51,12 @@ const auth = async (req, res, next) => {
           email: req.user.email,
           role: req.user.role,
           assignedBlocks: req.user.assignedBlocks
+
         });
         return next();
       }
       
-      if (decoded.role.includes('-incharge') || ['gate'].includes(decoded.role)) {
+      if (decoded.role.includes('-incharge') || ['gate', 'warden'].includes(decoded.role)) {
         const floors = decoded.assignedFloor || [];
         const formattedFloors = Array.isArray(floors) ? floors : [floors];
         const hostelBlock = decoded.assignedBlock || decoded.hostelBlock;

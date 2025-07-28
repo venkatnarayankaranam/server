@@ -105,12 +105,19 @@ app.use((req, res, next) => {
 // Import routes
 const outingRoutes = require('./routes/outings');
 const userRoutes = require('./routes/users');
+const gateRoutes = require('./routes/gate');
 
 // Register routes
 app.use('/auth', require('./routes/auth'));
 app.use('/outings', outingRoutes);
 app.use('/dashboard', require('./routes/dashboard'));
 app.use('/users', userRoutes);
+app.use('/gate', gateRoutes);
+
+// Start QR scheduler for automatic incoming QR generation and midnight expiry
+const { startQRScheduler, startMidnightExpiryScheduler } = require('./services/qrScheduler');
+startQRScheduler();
+startMidnightExpiryScheduler();
 
 // Add error handling for 404s
 app.use((req, res) => {
