@@ -56,7 +56,7 @@ const auth = async (req, res, next) => {
         return next();
       }
       
-      if (decoded.role.includes('-incharge') || ['gate', 'warden'].includes(decoded.role)) {
+      if (decoded.role.includes('-incharge') || ['gate', 'warden', 'security'].includes(decoded.role)) {
         const floors = decoded.assignedFloor || [];
         const formattedFloors = Array.isArray(floors) ? floors : [floors];
         const hostelBlock = decoded.assignedBlock || decoded.hostelBlock;
@@ -74,6 +74,7 @@ const auth = async (req, res, next) => {
         console.log('Auth middleware:', {
           email: req.user.email,
           role: req.user.role,
+          id: req.user.id,
           hostelBlock: req.user.hostelBlock,
           floors: req.user.assignedFloor
         });
