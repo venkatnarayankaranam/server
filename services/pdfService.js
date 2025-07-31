@@ -1,6 +1,6 @@
 const PDFDocument = require('pdfkit');
 
-const generatePDF = (res, { title, requests, role }) => {
+const generatePDF = (res, { title, requests, role, statistics, dateRange }) => {
   const doc = new PDFDocument({
     margin: 50,
     size: 'A4',
@@ -14,10 +14,45 @@ const generatePDF = (res, { title, requests, role }) => {
   doc.fontSize(16).font('Helvetica-Bold').text(title, { align: 'center' });
   doc.moveDown();
   doc.fontSize(10).font('Helvetica').text(`Generated on: ${new Date().toLocaleString()}`, { align: 'right' });
+  
+  // Add date range if provided
+  if (dateRange) {
+    doc.text(`Report Period: ${dateRange.start.toLocaleDateString()} to ${dateRange.end.toLocaleDateString()}`, { align: 'right' });
+  }
+  
   doc.moveDown();
 
+  // Add statistics section if provided
+  if (statistics) {
+    doc.fontSize(12).font('Helvetica-Bold').text('Summary Statistics:', 50, doc.y);
+    doc.moveDown(0.5);
+    
+    const statsY = doc.y;
+    const statsHeight = 80;
+    
+    // Draw statistics box
+    doc.rect(50, statsY, 500, statsHeight).stroke();
+    
+    doc.fontSize(10).font('Helvetica');
+    const statsText = [
+      `Total Approved Requests: ${statistics.totalRequests}`,
+      `Block Distribution - D-Block: ${statistics.byBlock?.['D-Block'] || 0} | E-Block: ${statistics.byBlock?.['E-Block'] || 0} | Womens-Block: ${statistics.byBlock?.['Womens-Block'] || 0}`,
+      `Time Period - This Week: ${statistics.byDateRange?.thisWeek || 0} | This Month: ${statistics.byDateRange?.thisMonth || 0}`,
+      `Report Generated: ${new Date().toLocaleString()}`
+    ];
+    
+    statsText.forEach((text, index) => {
+      const x = 60 + (index % 3) * 150;
+      const y = statsY + 15 + Math.floor(index / 3) * 20;
+      doc.text(text, x, y);
+    });
+    
+    doc.y = statsY + statsHeight + 20;
+    doc.moveDown();
+  }
+
   // Define table layout
-  const tableTop = 150;
+  const tableTop = doc.y + 20;
   const columnSpacing = {
     srNo: 30,
     name: 100,

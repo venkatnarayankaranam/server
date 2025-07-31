@@ -64,7 +64,7 @@ connectWithRetry();
 
 // Update CORS configuration
 app.use(cors({
-  origin: ['https://outingapplication.vercel.app', process.env.FRONTEND_URL, 'http://localhost:5173'],
+  origin: ['https://outingapplication.vercel.app', process.env.FRONTEND_URL, 'http://localhost:5173', 'http://localhost:5174'],
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH'],
   allowedHeaders: ['Content-Type', 'Authorization'],
   credentials: true
@@ -106,6 +106,8 @@ app.use((req, res, next) => {
 const outingRoutes = require('./routes/outings');
 const userRoutes = require('./routes/users');
 const gateRoutes = require('./routes/gate');
+const studentRoutes = require('./routes/student');
+const reportRoutes = require('./routes/reports');
 
 // Register routes
 app.use('/auth', require('./routes/auth'));
@@ -113,6 +115,8 @@ app.use('/outings', outingRoutes);
 app.use('/dashboard', require('./routes/dashboard'));
 app.use('/users', userRoutes);
 app.use('/gate', gateRoutes);
+app.use('/students', studentRoutes);
+app.use('/reports', reportRoutes);
 
 // Start QR scheduler for automatic incoming QR generation and midnight expiry
 const { startQRScheduler, startMidnightExpiryScheduler } = require('./services/qrScheduler');

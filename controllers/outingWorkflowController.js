@@ -1,5 +1,6 @@
 const OutingRequest = require('../models/OutingRequest');
 const User = require('../models/User');
+const Notification = require('../models/Notification');
 const socketIO = require('../config/socket');
 const QRCode = require('qrcode');
 
@@ -28,10 +29,10 @@ exports.handleApproval = async (req, res) => {
     const userRole = req.user.role;
 
     // Block main gate approval
-    if (userRole === 'gate' || userRole === 'warden') {
+    if (userRole === 'gate') {
       return res.status(403).json({
         success: false,
-        message: 'Main Gate or Warden cannot approve requests.'
+        message: 'Main Gate cannot approve requests.'
       });
     }
 
@@ -72,29 +73,48 @@ exports.handleApproval = async (req, res) => {
         request.approvalFlags.hostelIncharge.isApproved = true;
         request.approvalFlags.hostelIncharge.timestamp = new Date();
         request.approvalFlags.hostelIncharge.remarks = remarks;
-        // If both approved, mark request approved
-    if (request.approvalFlags.floorIncharge.isApproved && request.approvalFlags.hostelIncharge.isApproved) {
-      request.status = 'approved';
-      request.currentLevel = 'completed';
-
-      // Generate outgoing QR code on final approval
-      const qrPayload = {
-        requestId: request._id.toString(),
-        studentId: request.studentId._id.toString(),
-        type: 'outgoing',
-        generatedAt: new Date()
-      };
-      request.qrCode.outgoing.data = await QRCode.toDataURL(JSON.stringify(qrPayload));
-      request.qrCode.outgoing.generatedAt = new Date();
-    } else {
-      // Should not happen, but keep currentLevel as hostel-incharge
-      request.currentLevel = 'hostel-incharge';
-    }
+        // Move to warden level after hostel incharge approval
+        request.currentLevel = 'warden';
       } else {
         // Rejected by hostel incharge
         request.approvalFlags.hostelIncharge.isApproved = false;
         request.approvalFlags.hostelIncharge.timestamp = new Date();
         request.approvalFlags.hostelIncharge.remarks = remarks;
+        request.status = 'denied';
+        request.currentLevel = 'completed';
+      }
+    } else if (userRole === 'warden') {
+      // Can only approve if both floor incharge and hostel incharge approved
+      if (!request.approvalFlags.floorIncharge.isApproved || !request.approvalFlags.hostelIncharge.isApproved) {
+        return res.status(400).json({
+          success: false,
+          message: 'Both Floor Incharge and Hostel Incharge approval required before Warden approval.'
+        });
+      }
+
+      if (approvalStatus === 'approved') {
+        request.approvalFlags.warden.isApproved = true;
+        request.approvalFlags.warden.timestamp = new Date();
+        request.approvalFlags.warden.remarks = remarks;
+        
+        // Final approval - generate QR code and mark as approved
+        request.status = 'approved';
+        request.currentLevel = 'completed';
+
+        // Generate outgoing QR code on final approval
+        const qrPayload = {
+          requestId: request._id.toString(),
+          studentId: request.studentId._id.toString(),
+          type: 'outgoing',
+          generatedAt: new Date()
+        };
+        request.qrCode.outgoing.data = await QRCode.toDataURL(JSON.stringify(qrPayload));
+        request.qrCode.outgoing.generatedAt = new Date();
+      } else {
+        // Rejected by warden
+        request.approvalFlags.warden.isApproved = false;
+        request.approvalFlags.warden.timestamp = new Date();
+        request.approvalFlags.warden.remarks = remarks;
         request.status = 'denied';
         request.currentLevel = 'completed';
       }
@@ -114,6 +134,9 @@ exports.handleApproval = async (req, res) => {
     });
 
     await request.save();
+
+    // Send notification to student
+    await exports.sendStudentNotification(request, approvalStatus, userRole);
 
     // Send response
     res.json({
@@ -344,5 +367,55 @@ exports.verifyQRCode = async (req, res) => {
   } catch (error) {
     console.error('QR verification error:', error);
     res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+// Helper method to send notifications to students
+exports.sendStudentNotification = async (request, approvalStatus, userRole) => {
+  try {
+    let title, message;
+    
+    if (approvalStatus === 'approved') {
+      if (request.status === 'approved' && request.currentLevel === 'completed') {
+        // Final approval from warden
+        title = 'Outing Request Approved';
+        message = 'Your outing request has been accepted. QR code generated successfully.';
+      } else {
+        // Intermediate approval
+        title = 'Outing Request Updated';
+        message = `Your outing request has been approved by ${userRole.replace('-', ' ')} and moved to the next level.`;
+      }
+    } else {
+      // Rejected
+      title = 'Outing Request Denied';
+      message = 'Your outing request has been denied.';
+    }
+
+    // Create notification
+    const notification = new Notification({
+      userId: request.studentId._id || request.studentId,
+      title,
+      message,
+      type: 'outingUpdate',
+      referenceId: request._id,
+      read: false
+    });
+
+    await notification.save();
+
+    // Emit real-time notification if socket is available
+    if (socketIO.getIO()) {
+      socketIO.getIO().to(request.studentId._id.toString()).emit('notification', {
+        id: notification._id,
+        title,
+        message,
+        type: 'outingUpdate',
+        createdAt: notification.createdAt
+      });
+    }
+
+  } catch (error) {
+    console.error('Notification error:', error);
+    // Don't throw error to avoid disrupting the main approval flow
   }
 };

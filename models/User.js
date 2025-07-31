@@ -19,7 +19,7 @@ const userSchema = new mongoose.Schema({
       // Remove requirement for hostel-incharge as they manage all blocks
       return ['student', 'floor-incharge'].includes(this.role);
     },
-    enum: ['A-Block', 'B-Block', 'C-Block', 'D-Block', 'E-Block'] 
+    enum: ['A-Block', 'B-Block', 'C-Block', 'D-Block', 'E-Block', 'Womens-Block'] 
   },
   floor: { 
     type: String, 

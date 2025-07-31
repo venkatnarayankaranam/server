@@ -29,6 +29,17 @@ const ADMIN_CREDENTIALS = {
 
 router.post('/register', async (req, res) => {
   try {
+    console.log('🎓 Student Registration Request:', {
+      body: req.body,
+      hasRequiredFields: {
+        email: !!req.body.email,
+        name: !!req.body.name,
+        rollNumber: !!req.body.rollNumber,
+        branch: !!req.body.branch,
+        semester: !!req.body.semester
+      }
+    });
+
     const {
       email,
       password,
@@ -43,6 +54,14 @@ router.post('/register', async (req, res) => {
       semester,
     } = req.body;
 
+    // Validate required fields
+    if (!email || !name || !rollNumber || !hostelBlock || !floor || !roomNumber) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Missing required fields: email, name, rollNumber, hostelBlock, floor, roomNumber are required' 
+      });
+    }
+
     let user = await User.findOne({ email });
     if (user) {
       return res.status(400).json({ success: false, message: 'User already exists' });
@@ -51,13 +70,13 @@ router.post('/register', async (req, res) => {
     // Format floor value
     const formattedFloor = User.formatFloor(floor);
     
-    // Format hostel block (add -Block if not present)
+    // Format hostel block (ensure proper format)
     const formattedHostelBlock = hostelBlock?.includes('-Block') ? hostelBlock : `${hostelBlock}-Block`;
 
     const salt = await bcrypt.genSalt(10);
     const hashedPassword = await bcrypt.hash(password, salt);
 
-    user = new User({
+    const userData = {
       email,
       password: hashedPassword,
       name,
@@ -65,24 +84,55 @@ router.post('/register', async (req, res) => {
       phoneNumber,
       parentPhoneNumber,
       hostelBlock: formattedHostelBlock,
-      floor: formattedFloor, // Use formatted floor value
+      floor: formattedFloor,
       roomNumber,
       branch: branch || 'Computer Science', // Default branch
       semester: semester || 1, // Default semester
       role: 'student',
+    };
+
+    console.log('📝 Creating user with data:', {
+      ...userData,
+      password: '[HIDDEN]'
     });
 
+    user = new User(userData);
     await user.save();
+
+    console.log('✅ Student registered successfully:', {
+      id: user._id,
+      name: user.name,
+      email: user.email,
+      rollNumber: user.rollNumber
+    });
 
     res.status(201).json({
       success: true,
-      message: 'User registered successfully',
+      message: 'Student registered successfully',
+      student: {
+        id: user._id,
+        name: user.name,
+        email: user.email,
+        rollNumber: user.rollNumber,
+        hostelBlock: user.hostelBlock,
+        floor: user.floor,
+        roomNumber: user.roomNumber,
+        branch: user.branch,
+        semester: user.semester
+      }
     });
   } catch (error) {
-    console.error('Registration error:', error);
+    console.error('❌ Registration error:', {
+      message: error.message,
+      name: error.name,
+      stack: error.stack,
+      body: req.body
+    });
+    
     res.status(500).json({
       success: false,
-      message: error.message || 'Server error',
+      message: error.message || 'Server error during registration',
+      details: error.name // For debugging
     });
   }
 });

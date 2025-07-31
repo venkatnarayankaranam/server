@@ -944,22 +944,85 @@ router.get('/approved-requests/pdf', auth, checkRole(['floor-incharge', 'hostel-
       'warden': 'Warden Report - Approved Outing Requests'
     };
 
-    // Get requests based on role
-    const requests = await OutingRequest.find({
-      status: 'approved',
-      ...(req.user.role === 'hostel-incharge' ? {
-        hostelBlock: { $in: req.user.assignedBlocks }
-      } : req.user.role === 'floor-incharge' ? {
+    // Get requests based on role with proper logging
+    console.log('🔍 PDF Report Request:', {
+      role: req.user.role,
+      userEmail: req.user.email,
+      assignedBlocks: req.user.assignedBlocks,
+      assignedBlock: req.user.assignedBlock,
+      assignedFloor: req.user.assignedFloor
+    });
+
+    let query = {};
+    
+    if (req.user.role === 'hostel-incharge') {
+      // Hostel incharge can see all approved requests from D-Block, E-Block, Womens-Block
+      query = {
+        status: 'approved',
+        hostelBlock: { $in: ['D-Block', 'E-Block', 'Womens-Block'] }
+      };
+    } else if (req.user.role === 'floor-incharge') {
+      query = {
+        status: 'approved',
         hostelBlock: req.user.assignedBlock,
         floor: { $in: req.user.assignedFloor }
-      } : {})
-    }).populate('studentId', 'name rollNumber hostelBlock floor roomNumber phoneNumber parentPhoneNumber branch');
+      };
+    } else {
+      // Warden can see all approved requests
+      query = { status: 'approved' };
+    }
 
-    // Generate PDF
+    console.log('📊 PDF Query:', query);
+
+    const requests = await OutingRequest.find(query)
+      .populate('studentId', 'name rollNumber hostelBlock floor roomNumber phoneNumber parentPhoneNumber branch')
+      .sort({ createdAt: -1 });
+
+    console.log('📋 Found Requests for PDF:', {
+      count: requests.length,
+      sampleRequest: requests[0] ? {
+        id: requests[0]._id,
+        studentName: requests[0].studentId?.name,
+        status: requests[0].status,
+        hostelBlock: requests[0].hostelBlock
+      } : 'No requests found'
+    });
+
+    // Generate statistics for the report
+    const statistics = {
+      totalRequests: requests.length,
+      approvedCount: requests.filter(r => r.status === 'approved').length,
+      byBlock: {
+        'D-Block': requests.filter(r => r.hostelBlock === 'D-Block').length,
+        'E-Block': requests.filter(r => r.hostelBlock === 'E-Block').length,
+        'Womens-Block': requests.filter(r => r.hostelBlock === 'Womens-Block').length
+      },
+      byDateRange: {
+        thisWeek: requests.filter(r => {
+          const reqDate = new Date(r.outingDate);
+          const weekAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+          return reqDate >= weekAgo;
+        }).length,
+        thisMonth: requests.filter(r => {
+          const reqDate = new Date(r.outingDate);
+          const monthAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+          return reqDate >= monthAgo;
+        }).length
+      }
+    };
+
+    console.log('📈 PDF Report Statistics:', statistics);
+
+    // Generate PDF with enhanced data
     generatePDF(res, {
       title: titles[req.user.role],
       requests,
-      role: req.user.role
+      role: req.user.role,
+      statistics,
+      dateRange: {
+        start: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000), // Last 30 days
+        end: new Date()
+      }
     });
 
   } catch (error) {
