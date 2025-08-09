@@ -4,7 +4,7 @@ const QRCode = require('qrcode');
 const outingRequestSchema = new mongoose.Schema({
   studentId: {
     type: mongoose.Schema.Types.ObjectId,
-    ref: 'User',
+    ref: 'Student',
     required: true,
   },
   outingDate: {
@@ -29,6 +29,11 @@ const outingRequestSchema = new mongoose.Schema({
     type: String,
     required: true
   },
+  category: {
+    type: String,
+    enum: ['normal', 'emergency'],
+    default: 'normal'
+  },
   parentPhoneNumber: {
     type: String,
     required: true,
@@ -52,8 +57,8 @@ const outingRequestSchema = new mongoose.Schema({
   },
   currentLevel: {
     type: String,
-    enum: ['floor-incharge', 'hostel-incharge', 'warden', 'completed'],
-    default: 'floor-incharge'
+    enum: ['floor-incharge', 'hostel-incharge', 'warden', 'completed']
+    // Remove default value - pre-save middleware will handle this
   },
   approvalFlags: {
     floorIncharge: {
@@ -132,6 +137,8 @@ const outingRequestSchema = new mongoose.Schema({
     suspiciousComment: String,
     securityComment: String
   }]
+}, {
+  collection: 'outingrequests'
 });
 
 // Add TTL index to expire checkIn and checkOut after 24 hours
@@ -163,6 +170,12 @@ outingRequestSchema.statics.findForHostelIncharge = function(userId, hostelBlock
   return this.find({
     $or: [
       {
+        currentLevel: 'hostel-incharge',
+        hostelBlock: hostelBlock
+      },
+      {
+        // Include emergency requests that skip floor incharge
+        category: 'emergency',
         currentLevel: 'hostel-incharge',
         hostelBlock: hostelBlock
       },
@@ -305,6 +318,15 @@ outingRequestSchema.methods.validateApprovalSequence = function(newApproval) {
 
 outingRequestSchema.pre('save', function(next) {
   try {
+    // Always set currentLevel for new requests
+    if (this.isNew) {
+      if (this.category === 'emergency') {
+        this.currentLevel = 'hostel-incharge';
+      } else {
+        this.currentLevel = 'floor-incharge';
+      }
+    }
+
     if (this.isModified('approvalFlow') && this.approvalFlow?.length > 0) {
       // Get latest approval
       const latestApproval = this.approvalFlow[this.approvalFlow.length - 1];
@@ -328,7 +350,13 @@ outingRequestSchema.pre('save', function(next) {
             this.approvalFlags.hostelIncharge.timestamp = latestApproval.timestamp || new Date();
             this.approvalFlags.hostelIncharge.remarks = latestApproval.remarks || '';
             if (this.currentLevel === 'hostel-incharge') {
-              this.currentLevel = 'warden';
+              // For emergency requests, directly generate QR code and complete
+              if (this.category === 'emergency') {
+                this.currentLevel = 'completed';
+                this.status = 'approved';
+              } else {
+                this.currentLevel = 'warden';
+              }
             }
             break;
           case '3':
@@ -354,6 +382,14 @@ outingRequestSchema.pre('save', function(next) {
 outingRequestSchema.pre('save', function(next) {
   try {
     if (this.isModified('approvalFlow')) {
+      // Skip sequence validation for emergency requests approved by hostel incharge
+      if (this.category === 'emergency' && 
+          this.approvalFlow.length === 1 && 
+          (this.approvalFlow[0].level === 'hostel-incharge' || 
+           this.approvalFlow[0].level === '2')) {
+        return next();
+      }
+      
       // Skip sequence validation for initial floor incharge approval
       if (this.approvalFlow.length === 1 && 
           (this.approvalFlow[0].level === 'floor-incharge' || 
@@ -433,6 +469,12 @@ outingRequestSchema.methods.moveToNextLevel = function() {
 };
 
 outingRequestSchema.methods.checkAllApprovals = function() {
+  // For emergency permissions, only hostel incharge approval is required
+  if (this.category === 'emergency') {
+    return this.approvalFlags.hostelIncharge.isApproved;
+  }
+  
+  // For normal permissions, all three approvals are required
   return (
     this.approvalFlags.floorIncharge.isApproved &&
     this.approvalFlags.hostelIncharge.isApproved &&
@@ -544,6 +586,27 @@ outingRequestSchema.pre('save', async function(next) {
   }
 });
 
+// Helper method to get approver by level from approvalFlow
+outingRequestSchema.methods.getApproverByLevel = function(level) {
+  // Handle both numeric and string levels
+  const levelMap = {
+    '1': 'floor-incharge',
+    '2': 'hostel-incharge', 
+    '3': 'warden',
+    'floor-incharge': 'floor-incharge',
+    'hostel-incharge': 'hostel-incharge',
+    'warden': 'warden'
+  };
+  
+  const targetLevel = levelMap[level] || level;
+  const approval = this.approvalFlow.find(a => {
+    const approvalLevel = levelMap[a.level] || a.level;
+    return approvalLevel === targetLevel;
+  });
+  
+  return approval ? approval.approvedBy : null;
+};
+
 // Generate outgoing QR code with student details
 outingRequestSchema.methods.generateOutgoingQR = async function() {
   if (!this.checkAllApprovals()) {
@@ -572,6 +635,8 @@ outingRequestSchema.methods.generateOutgoingQR = async function() {
     requestId: this._id.toString(),
     qrId: qrId,
     type: 'OUTGOING',
+    category: this.category || 'normal',
+    isEmergency: this.category === 'emergency',
     student: {
       id: this.studentId._id.toString(),
       name: this.studentId.name,
@@ -586,12 +651,13 @@ outingRequestSchema.methods.generateOutgoingQR = async function() {
       date: this.outingDate,
       outingTime: this.outingTime,
       returnTime: this.returnTime,
-      purpose: this.purpose
+      purpose: this.purpose,
+      category: this.category || 'normal'
     },
     approvals: {
-      floorIncharge: this.approvalFlags.floorIncharge.approvedBy,
-      hostelIncharge: this.approvalFlags.hostelIncharge.approvedBy,
-      warden: this.approvalFlags.warden.approvedBy
+      floorIncharge: this.getApproverByLevel('floor-incharge'),
+      hostelIncharge: this.getApproverByLevel('hostel-incharge'),
+      warden: this.getApproverByLevel('warden')
     },
     generatedAt: new Date().toISOString(),
     validUntil: validUntil.toISOString()
@@ -640,6 +706,8 @@ outingRequestSchema.methods.generateIncomingQR = async function() {
     requestId: this._id.toString(),
     qrId: qrId,
     type: 'INCOMING',
+    category: this.category || 'normal',
+    isEmergency: this.category === 'emergency',
     student: {
       id: this.studentId._id.toString(),
       name: this.studentId.name,
@@ -654,7 +722,8 @@ outingRequestSchema.methods.generateIncomingQR = async function() {
       date: this.outingDate,
       outingTime: this.outingTime,
       returnTime: this.returnTime,
-      purpose: this.purpose
+      purpose: this.purpose,
+      category: this.category || 'normal'
     },
     generatedAt: new Date().toISOString(),
     validUntil: validUntil.toISOString()
@@ -762,6 +831,8 @@ outingRequestSchema.methods.scanQR = async function(qrId, scannedBy, location = 
       type: scanType,
       student: await this.studentId,
       scanTime: new Date(),
+      category: this.category || 'normal',
+      isEmergency: this.category === 'emergency',
       message: `Student ${scanType === 'OUT' ? 'exit' : 'entry'} recorded successfully`
     };
     

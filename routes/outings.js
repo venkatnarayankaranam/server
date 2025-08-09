@@ -3,8 +3,10 @@ const router = express.Router();
 const mongoose = require('mongoose');
 const OutingRequest = require('../models/OutingRequest');
 const User = require('../models/User');
+const Student = require('../models/Student');
 const { auth, checkRole } = require('../middleware/auth');
 const socketIO = require('../config/socket');
+const Notification = require('../models/Notification');
 const workflowController = require('../controllers/outingWorkflowController');
 const PDFDocument = require('pdfkit');
 const { generatePDF } = require('../services/pdfService');
@@ -36,8 +38,7 @@ router.get('/floor-incharge/students/:email', auth, async (req, res) => {
     });
 
     // Get all students under this floor incharge
-    const students = await User.find({
-      role: 'student',
+    const students = await Student.find({
       hostelBlock: floorIncharge.hostelBlock,
       floor: { $in: floors }
     }).select('name email rollNumber hostelBlock floor roomNumber phoneNumber parentPhoneNumber branch semester')
@@ -70,23 +71,39 @@ router.get('/floor-incharge/students/:email', auth, async (req, res) => {
 // Get all outing requests for floor incharge (not just pending)
 router.get('/floor-incharge/requests', auth, checkRole(['floor-incharge']), async (req, res) => {
   try {
-    const { assignedBlock, assignedFloor } = req.user;
+    // Prefer assignedBlock/assignedFloor if present, else fallback to hostelBlock/floor for legacy users
+    const assignedBlock = req.user.assignedBlock || req.user.hostelBlock;
+    const assignedFloorRaw = req.user.assignedFloor && req.user.assignedFloor.length > 0
+      ? req.user.assignedFloor
+      : (req.user.floor ? [req.user.floor] : []);
     
     console.log('Floor Incharge Request Query:', {
       user: req.user,
       assignedBlock,
-      assignedFloor
+      assignedFloor: assignedFloorRaw
     });
 
-    if (!assignedBlock || !assignedFloor || assignedFloor.length === 0) {
+    if (!assignedBlock || !assignedFloorRaw || assignedFloorRaw.length === 0) {
       return res.status(400).json({
         success: false,
         message: 'Floor Incharge has no assigned block or floors',
-        debug: { assignedBlock, assignedFloor }
+        debug: { assignedBlock, assignedFloor: assignedFloorRaw }
       });
     }
 
-    const floors = Array.isArray(assignedFloor) ? assignedFloor : [assignedFloor];
+    // Normalize possible floor representations
+    const normalizeFloor = (f) => {
+      if (!f) return f;
+      const s = String(f);
+      if (s === '1' || s === '1st' || s.includes('1st')) return '1st Floor';
+      if (s === '2' || s === '2nd' || s.includes('2nd')) return '2nd Floor';
+      if (s === '3' || s === '3rd' || s.includes('3rd')) return '3rd Floor';
+      if (s === '4' || s === '4th' || s.includes('4th')) return '4th Floor';
+      return s;
+    };
+    const floors = (Array.isArray(assignedFloorRaw) ? assignedFloorRaw : [assignedFloorRaw])
+      .filter(Boolean)
+      .map(normalizeFloor);
 
     const requests = await OutingRequest.find({
       hostelBlock: assignedBlock,
@@ -101,8 +118,7 @@ router.get('/floor-incharge/requests', auth, checkRole(['floor-incharge']), asyn
     console.log(`Found ${requests.length} requests for ${assignedBlock}, floors: ${floors.join(', ')}`);
 
     const stats = {
-      totalStudents: await User.countDocuments({
-        role: 'student',
+      totalStudents: await Student.countDocuments({
         hostelBlock: assignedBlock,
         floor: { $in: floors }
       }),
@@ -190,33 +206,57 @@ router.get('/floor-incharge/approved-students', auth, checkRole(['floor-incharge
 // Get approved students for warden
 router.get('/approved-students/warden', auth, checkRole(['warden']), async (req, res) => {
   try {
+    console.log('🔍 Fetching approved students for warden...');
+    
     const approvedRequests = await OutingRequest.find({
       status: 'approved',
       'approvalFlags.warden.isApproved': true
     })
-    .populate('studentId', 'name email rollNumber hostelBlock floor roomNumber phoneNumber parentPhoneNumber branch semester')
+    .populate({
+      path: 'studentId',
+      model: 'Student',
+      select: 'name email rollNumber hostelBlock floor roomNumber phoneNumber parentPhoneNumber branch semester'
+    })
     .sort({ outingDate: -1 });
 
+    console.log(`📊 Found ${approvedRequests.length} approved requests for warden`);
+
+    // Filter out requests where student population failed and map the data
+    const validRequests = approvedRequests.filter(request => request.studentId);
+    
     const uniqueStudents = Array.from(new Map(
-      approvedRequests.map(request => [
-        request.studentId._id.toString(),
-        {
-          ...request.studentId.toObject(),
-          outingTime: request.outingTime,
-          returnTime: request.returnTime,
-          outingDate: request.outingDate,
-          requestId: request._id
+      validRequests.map(request => {
+        try {
+          return [
+            request.studentId._id.toString(),
+            {
+              ...request.studentId.toObject(),
+              outingTime: request.outingTime,
+              returnTime: request.returnTime,
+              outingDate: request.outingDate,
+              requestId: request._id
+            }
+          ];
+        } catch (err) {
+          console.error('Error processing student data:', err);
+          return null;
         }
-      ])
+      }).filter(item => item !== null)
     ).values());
+
+    console.log(`✅ Returning ${uniqueStudents.length} unique students to warden`);
 
     res.json({
       success: true,
       students: uniqueStudents
     });
   } catch (error) {
-    console.error('Error fetching warden approved students:', error);
-    res.status(500).json({ success: false, message: error.message });
+    console.error('❌ Error fetching warden approved students:', error);
+    res.status(500).json({ 
+      success: false, 
+      message: error.message,
+      stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
+    });
   }
 });
 
@@ -224,35 +264,58 @@ router.get('/approved-students/warden', auth, checkRole(['warden']), async (req,
 router.get('/approved-students/hostel-incharge', auth, checkRole(['hostel-incharge']), async (req, res) => {
   try {
     const { assignedBlocks } = req.user;
+    console.log('🔍 Fetching approved students for hostel-incharge, blocks:', assignedBlocks);
 
     const approvedRequests = await OutingRequest.find({
       hostelBlock: { $in: assignedBlocks },
       status: 'approved',
       'approvalFlags.hostelIncharge.isApproved': true
     })
-    .populate('studentId', 'name email rollNumber hostelBlock floor roomNumber phoneNumber parentPhoneNumber branch semester')
+    .populate({
+      path: 'studentId',
+      model: 'Student',
+      select: 'name email rollNumber hostelBlock floor roomNumber phoneNumber parentPhoneNumber branch semester'
+    })
     .sort({ outingDate: -1 });
 
+    console.log(`📊 Found ${approvedRequests.length} approved requests for hostel-incharge`);
+
+    // Filter out requests where student population failed and map the data
+    const validRequests = approvedRequests.filter(request => request.studentId);
+
     const uniqueStudents = Array.from(new Map(
-      approvedRequests.map(request => [
-        request.studentId._id.toString(),
-        {
-          ...request.studentId.toObject(),
-          outingTime: request.outingTime,
-          returnTime: request.returnTime,
-          outingDate: request.outingDate,
-          requestId: request._id
+      validRequests.map(request => {
+        try {
+          return [
+            request.studentId._id.toString(),
+            {
+              ...request.studentId.toObject(),
+              outingTime: request.outingTime,
+              returnTime: request.returnTime,
+              outingDate: request.outingDate,
+              requestId: request._id
+            }
+          ];
+        } catch (err) {
+          console.error('Error processing student data:', err);
+          return null;
         }
-      ])
+      }).filter(item => item !== null)
     ).values());
+
+    console.log(`✅ Returning ${uniqueStudents.length} unique students to hostel-incharge`);
 
     res.json({
       success: true,
       students: uniqueStudents
     });
   } catch (error) {
-    console.error('Error fetching hostel incharge approved students:', error);
-    res.status(500).json({ success: false, message: error.message });
+    console.error('❌ Error fetching hostel incharge approved students:', error);
+    res.status(500).json({ 
+      success: false, 
+      message: error.message,
+      stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
+    });
   }
 });
 
@@ -334,6 +397,17 @@ router.patch('/floor-incharge/request/:requestId/:action', auth, checkRole(['flo
       });
     }
 
+    // Create notification for student on FI decision
+    try {
+      await Notification.create({
+        userId: request.studentId._id,
+        title: action === 'approve' ? 'Outing Request Moved to Hostel Incharge' : 'Outing Request Denied',
+        message: action === 'approve' ? 'Your outing request was approved by Floor Incharge.' : 'Your outing request was denied by Floor Incharge.',
+        type: 'outingUpdate',
+        referenceId: request._id
+      });
+    } catch (e) {}
+
     res.json({
       success: true,
       message: `Request ${action}d successfully`,
@@ -357,7 +431,7 @@ router.patch('/floor-incharge/request/:requestId/:action', auth, checkRole(['flo
 // Create new outing request (for students)
 router.post('/requests/submit', auth, checkRole(['student']), async (req, res) => {
   try {
-    const student = await User.findById(req.user.id);
+    const student = await Student.findById(req.user.id);
     if (!student) {
       return res.status(404).json({ 
         success: false, 
@@ -366,13 +440,27 @@ router.post('/requests/submit', auth, checkRole(['student']), async (req, res) =
     }
 
     // Validate required fields
-    const { outingDate, outTime, returnTime, purpose, parentContact } = req.body;
+    const { outingDate, outTime, returnTime, purpose, parentContact, category = 'normal' } = req.body;
     
     if (!outingDate || !outTime || !returnTime || !purpose) {
       return res.status(400).json({
         success: false,
         message: 'Missing required fields',
         required: ['outingDate', 'outTime', 'returnTime', 'purpose']
+      });
+    }
+
+    // Check if student has any active outing requests (pending or approved)
+    const activeRequest = await OutingRequest.findOne({
+      studentId: req.user.id,
+      status: { $in: ['pending', 'approved'] },
+      currentLevel: { $ne: 'completed' }
+    });
+
+    if (activeRequest) {
+      return res.status(400).json({
+        success: false,
+        message: 'You already have an active outing request. Please complete or cancel your current request before creating a new one.'
       });
     }
 
@@ -383,6 +471,7 @@ router.post('/requests/submit', auth, checkRole(['student']), async (req, res) =
         outingTime: outTime,
         returnTime: returnTime,
         purpose: purpose,
+        category: category,
         parentPhoneNumber: parentContact || student.parentPhoneNumber,
         hostelBlock: student.hostelBlock,
         floor: student.floor
@@ -471,16 +560,37 @@ router.post('/:requestId/approve', auth, async (req, res) => {
     // Add approval to flow
     outingRequest.approvalFlow.push({
       ...currentApproval,
+      level: 'hostel-incharge', // Explicitly set the level for hostel incharge approval
       timestamp: new Date(),
       status: 'approved'
     });
 
-    // Update request status
-    outingRequest.hostelInchargeApproval = 'approved';
+    // Update request status and approval flags
+    outingRequest.approvalFlags.hostelIncharge.isApproved = true;
+    outingRequest.approvalFlags.hostelIncharge.timestamp = new Date();
+    outingRequest.approvalFlags.hostelIncharge.remarks = currentApproval.remarks || '';
     outingRequest.currentLevel = 'warden';
     outingRequest.lastModifiedBy = currentApproval.approverInfo.email;
 
+    // If emergency, mark as approved/completed and generate QR
+    if (outingRequest.category === 'emergency') {
+      outingRequest.status = 'approved';
+      outingRequest.currentLevel = 'completed';
+    }
+
+    // Save the request first
     await outingRequest.save();
+
+    // Generate QR code for emergency outing after saving
+    if (outingRequest.category === 'emergency') {
+      try {
+        await outingRequest.generateOutgoingQR();
+        // Save again to persist the QR code
+        await outingRequest.save();
+      } catch (qrError) {
+        console.error('Error generating QR for emergency outing:', qrError);
+      }
+    }
 
     res.json({
       success: true,
@@ -611,14 +721,16 @@ router.get('/dashboard/hostel-incharge', auth, checkRole(['hostel-incharge']), a
   try {
     const { assignedBlocks } = req.user;
     
+    // Get requests that are at hostel-incharge level (including emergency requests)
     const requests = await OutingRequest.find({
-      hostelBlock: { $in: assignedBlocks }
+      hostelBlock: { $in: assignedBlocks },
+      currentLevel: 'hostel-incharge'
     })
     .populate('studentId', 'name email rollNumber phoneNumber hostelBlock floor roomNumber branch semester')
     .lean() // Convert to plain JavaScript object
     .exec();
 
-    // Transform requests to include approval status
+    // Transform requests to include approval status and category
     const transformedRequests = requests.map(request => ({
       id: request._id,
       studentName: request.studentId?.name,
@@ -634,6 +746,7 @@ router.get('/dashboard/hostel-incharge', auth, checkRole(['hostel-incharge']), a
       purpose: request.purpose,
       status: request.status,
       currentLevel: request.currentLevel,
+      category: request.category, // Include category for emergency badge
       floorInchargeApproval: request.approvalFlags?.floorIncharge?.isApproved ? 'approved' : 'pending',
       hostelInchargeApproval: request.approvalFlags?.hostelIncharge?.isApproved ? 'approved' : 'pending',
       wardenApproval: request.approvalFlags?.warden?.isApproved ? 'approved' : 'pending',
@@ -665,6 +778,11 @@ router.get('/dashboard/hostel-incharge', auth, checkRole(['hostel-incharge']), a
         hostelBlock: { $in: assignedBlocks },
         'approvalFlags.floorIncharge.isApproved': false,
         currentLevel: 'floor-incharge'
+      }),
+      emergency: await OutingRequest.countDocuments({
+        hostelBlock: { $in: assignedBlocks },
+        category: 'emergency',
+        currentLevel: 'hostel-incharge'
       })
     };
 
@@ -710,7 +828,7 @@ router.get('/dashboard/warden', auth, checkRole(['warden']), async (req, res) =>
     // Get additional stats
     const [totalHostels, totalStudents, outingsToday] = await Promise.all([
       OutingRequest.distinct('hostelBlock').countDocuments(),
-      User.countDocuments({ role: 'student' }),
+      Student.countDocuments({}),
       OutingRequest.countDocuments({
         outingDate: {
           $gte: new Date().setHours(0, 0, 0, 0),
@@ -906,6 +1024,269 @@ router.post('/warden/deny/:requestId', auth, checkRole(['warden']), async (req, 
     res.status(500).json({
       success: false,
       message: 'Failed to deny request',
+      error: error.message
+    });
+  }
+});
+
+// Floor Incharge deny endpoint
+router.post('/floor-incharge/deny/:requestId', auth, checkRole(['floor-incharge']), async (req, res) => {
+  try {
+    const request = await OutingRequest.findById(req.params.requestId)
+      .populate('studentId', 'name email rollNumber hostelBlock floor roomNumber');
+
+    if (!request) {
+      return res.status(404).json({
+        success: false,
+        message: 'Request not found'
+      });
+    }
+
+    // Check current status
+    if (request.status === 'denied') {
+      return res.status(400).json({
+        success: false,
+        message: 'Request is already denied'
+      });
+    }
+
+    // Update denial status using approvalFlags
+    if (!request.approvalFlags) {
+      request.approvalFlags = {
+        floorIncharge: { isApproved: false },
+        hostelIncharge: { isApproved: false },
+        warden: { isApproved: false }
+      };
+    }
+
+    // Update floor incharge denial
+    request.approvalFlags.floorIncharge = {
+      isApproved: false,
+      approvedBy: req.user.email,
+      approvedAt: new Date(),
+      remarks: req.body.comments || 'Denied by Floor Incharge'
+    };
+
+    // Update main status fields
+    request.status = 'denied';
+    request.currentLevel = 'completed';
+
+    await request.save();
+
+    // Emit socket event if needed
+    const io = req.app.get('io');
+    if (io) {
+      io.emit('floor-incharge-request-updated', {
+        requestId: request._id,
+        status: request.status,
+        level: 'floor-incharge'
+      });
+    }
+
+    res.json({
+      success: true,
+      message: 'Request denied successfully',
+      request: {
+        id: request._id,
+        status: request.status,
+        studentName: request.studentId.name,
+        currentLevel: request.currentLevel
+      }
+    });
+
+  } catch (error) {
+    console.error('Floor Incharge denial error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to deny request',
+      error: error.message
+    });
+  }
+});
+
+// Hostel Incharge deny endpoint
+router.post('/hostel-incharge/deny/:requestId', auth, checkRole(['hostel-incharge']), async (req, res) => {
+  try {
+    const request = await OutingRequest.findById(req.params.requestId)
+      .populate('studentId', 'name email rollNumber hostelBlock floor roomNumber');
+
+    if (!request) {
+      return res.status(404).json({
+        success: false,
+        message: 'Request not found'
+      });
+    }
+
+    // Check current status
+    if (request.status === 'denied') {
+      return res.status(400).json({
+        success: false,
+        message: 'Request is already denied'
+      });
+    }
+
+    // Update denial status using approvalFlags
+    if (!request.approvalFlags) {
+      request.approvalFlags = {
+        floorIncharge: { isApproved: false },
+        hostelIncharge: { isApproved: false },
+        warden: { isApproved: false }
+      };
+    }
+
+    // Update hostel incharge denial
+    request.approvalFlags.hostelIncharge = {
+      isApproved: false,
+      approvedBy: req.user.email,
+      approvedAt: new Date(),
+      remarks: req.body.comments || 'Denied by Hostel Incharge'
+    };
+
+    // Update main status fields
+    request.status = 'denied';
+    request.currentLevel = 'completed';
+
+    await request.save();
+
+    // Emit socket event if needed
+    const io = req.app.get('io');
+    if (io) {
+      io.emit('hostel-incharge-request-updated', {
+        requestId: request._id,
+        status: request.status,
+        level: 'hostel-incharge'
+      });
+    }
+
+    res.json({
+      success: true,
+      message: 'Request denied successfully',
+      request: {
+        id: request._id,
+        status: request.status,
+        studentName: request.studentId.name,
+        currentLevel: request.currentLevel
+      }
+    });
+
+  } catch (error) {
+    console.error('Hostel Incharge denial error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to deny request',
+      error: error.message
+    });
+  }
+});
+
+// Hostel incharge request actions (approve/deny) - similar to floor incharge
+router.patch('/hostel-incharge/request/:requestId/:action', auth, checkRole(['hostel-incharge']), async (req, res) => {
+  try {
+    const { requestId, action } = req.params;
+    const { comments = '' } = req.body;
+    
+    console.log('Processing hostel-incharge request:', {
+      requestId,
+      action,
+      userDetails: req.user
+    });
+
+    // Validate action
+    if (!['approve', 'deny'].includes(action)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid action'
+      });
+    }
+
+    const request = await OutingRequest.findById(requestId)
+      .populate('studentId', 'name email rollNumber hostelBlock floor roomNumber phoneNumber parentPhoneNumber');
+
+    if (!request) {
+      return res.status(404).json({
+        success: false,
+        message: 'Request not found'
+      });
+    }
+
+    // Validate request state - hostel incharge can approve/deny if status is pending and currentLevel is hostel-incharge
+    if (request.status !== 'pending' || request.currentLevel !== 'hostel-incharge') {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid request state for approval',
+        currentStatus: request.status,
+        currentLevel: request.currentLevel
+      });
+    }
+
+    // Update approval state
+    request.approvalFlags.hostelIncharge = {
+      isApproved: action === 'approve',
+      timestamp: new Date(),
+      remarks: comments
+    };
+
+    // Add to approval flow
+    request.approvalFlow.push({
+      level: 'hostel-incharge',
+      status: action === 'approve' ? 'approved' : 'denied',
+      timestamp: new Date(),
+      remarks: comments,
+      approvedBy: req.user.email,
+      approverInfo: {
+        email: req.user.email,
+        role: 'hostel-incharge'
+      }
+    });
+
+    if (action === 'approve') {
+      // For emergency requests, mark as completed immediately
+      if (request.category === 'emergency') {
+        request.status = 'approved';
+        request.currentLevel = 'completed';
+        
+        // Generate QR code for emergency outing after approval
+        try {
+          await request.generateOutgoingQR();
+        } catch (qrError) {
+          console.error('Error generating QR for emergency outing:', qrError);
+        }
+      } else {
+        // For normal requests, move to next level (warden)
+        request.currentLevel = 'warden';
+      }
+    } else {
+      // Deny the request
+      request.status = 'denied';
+      request.currentLevel = 'completed';
+    }
+
+    const savedRequest = await request.save();
+
+    // Emit socket event
+    const io = req.app.get('socketio');
+    if (io) {
+      io.emit('request-update', {
+        type: 'status-change',
+        request: savedRequest
+      });
+    }
+
+    res.json({
+      success: true,
+      message: `Request ${action}d successfully`,
+      request: {
+        id: savedRequest._id,
+        status: savedRequest.status,
+        currentLevel: savedRequest.currentLevel
+      }
+    });
+
+  } catch (error) {
+    console.error('Hostel incharge approval error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to process request',
       error: error.message
     });
   }

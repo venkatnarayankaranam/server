@@ -13,10 +13,19 @@ const { getIO } = require('../config/socket');
 // Submit new home permission request
 router.post('/requests/submit', auth, async (req, res) => {
   try {
-    const { goingDate, incomingDate, homeTownName, purpose, parentContact } = req.body;
+    const { goingDate, incomingDate, homeTownName, purpose, parentContact, category = 'normal' } = req.body;
+    
+    // Debug logging
+    console.log('🏠 Home Permission Request Received:', {
+      category,
+      studentId: req.user.id,
+      homeTownName,
+      purpose
+    });
     
     // Get student details
-    const student = await User.findById(req.user.id);
+    const Student = require('../models/Student');
+    const student = await Student.findById(req.user.id);
     if (!student) {
       return res.status(404).json({
         success: false,
@@ -45,28 +54,48 @@ router.post('/requests/submit', auth, async (req, res) => {
       incomingDate: new Date(incomingDate),
       homeTownName,
       purpose,
+      category: category,
       parentPhoneNumber: parentContact,
       hostelBlock: student.hostelBlock,
       floor: student.floor,
+      // currentLevel will be set automatically by pre-save middleware based on category
     });
 
     await homePermissionRequest.save();
 
+    // Debug logging after save
+    console.log('🏠 Home Permission Request Created:', {
+      id: homePermissionRequest._id,
+      category: homePermissionRequest.category,
+      currentLevel: homePermissionRequest.currentLevel,
+      status: homePermissionRequest.status,
+      studentId: homePermissionRequest.studentId,
+      hostelBlock: homePermissionRequest.hostelBlock,
+      floor: homePermissionRequest.floor
+    });
+
     // Populate student details for response
-    await homePermissionRequest.populate('studentId', 'name rollNumber email phoneNumber branch semester');
+    await homePermissionRequest.populate({
+      path: 'studentId',
+      model: 'Student',
+      select: 'name rollNumber email phoneNumber branch semester'
+    });
 
     // Emit socket event for real-time updates
     const io = getIO();
     if (io) {
-      io.emit('new-home-permission-request', {
+      const socketData = {
         requestId: homePermissionRequest._id,
         studentName: student.name,
         rollNumber: student.rollNumber,
         hostelBlock: student.hostelBlock,
         floor: student.floor,
         homeTownName,
-        currentLevel: 'floor-incharge'
-      });
+        currentLevel: homePermissionRequest.currentLevel // Use the actual currentLevel from the request
+      };
+      
+      console.log('🏠 Emitting socket event:', socketData);
+      io.emit('new-home-permission-request', socketData);
     }
 
     res.json({
@@ -100,7 +129,10 @@ router.get('/dashboard/student/requests', auth, async (req, res) => {
 
     res.json({
       success: true,
-      requests,
+      requests: requests.map(req => ({
+        ...req.toObject(),
+        category: req.category || 'normal'
+      })),
       stats
     });
 
@@ -130,11 +162,11 @@ router.get('/dashboard/floor-incharge', auth, async (req, res) => {
       ? floorIncharge.floor 
       : floorIncharge.floor ? [floorIncharge.floor] : [];
 
-    // Get requests for this floor incharge - only include current pending requests
-    // and requests that were previously handled by this floor incharge (for stats/history)
+    // Get requests for this floor incharge - exclude ALL emergency requests since they bypass floor incharge
     const requests = await HomePermissionRequest.find({
       hostelBlock: floorIncharge.hostelBlock,
-      floor: { $in: floors }
+      floor: { $in: floors },
+      category: 'normal' // Only show normal requests in floor incharge dashboard
     }).populate('studentId', 'name rollNumber email phoneNumber branch semester')
       .sort({ createdAt: -1 });
 
@@ -179,8 +211,13 @@ router.get('/dashboard/hostel-incharge', auth, async (req, res) => {
     const requests = await HomePermissionRequest.find({
       hostelBlock: hostelIncharge.hostelBlock,
       $or: [
-        { currentLevel: 'hostel-incharge' },
-        { 'approvalFlow.approvedBy': hostelIncharge.email }
+        { currentLevel: 'hostel-incharge' }, // Current requests at hostel incharge level
+        { 'approvalFlow.approvedBy': hostelIncharge.email }, // Previously approved by this incharge
+        { 
+          // Include emergency requests that should be at this level
+          category: 'emergency',
+          status: 'pending'
+        }
       ]
     }).populate('studentId', 'name rollNumber email phoneNumber branch semester')
       .sort({ createdAt: -1 });
@@ -445,6 +482,55 @@ router.post('/:requestId/deny', auth, async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Failed to deny home permission request',
+      error: error.message
+    });
+  }
+});
+
+// Debug endpoint to fix emergency requests that might be in wrong state
+router.post('/debug/fix-emergency-requests', auth, checkRole(['admin', 'warden']), async (req, res) => {
+  try {
+    // Find emergency requests that are still at floor-incharge level
+    const emergencyRequests = await HomePermissionRequest.find({
+      category: 'emergency',
+      currentLevel: 'floor-incharge',
+      status: 'pending'
+    });
+
+    console.log('🔧 Found emergency requests in wrong state:', emergencyRequests.length);
+
+    // Update them to hostel-incharge level
+    const updateResults = await Promise.all(
+      emergencyRequests.map(async (request) => {
+        request.currentLevel = 'hostel-incharge';
+        await request.save();
+        
+        console.log('✅ Fixed emergency request:', {
+          id: request._id,
+          category: request.category,
+          newCurrentLevel: request.currentLevel
+        });
+
+        return request;
+      })
+    );
+
+    res.json({
+      success: true,
+      message: `Fixed ${updateResults.length} emergency requests`,
+      fixedRequests: updateResults.map(r => ({
+        id: r._id,
+        category: r.category,
+        currentLevel: r.currentLevel,
+        studentId: r.studentId
+      }))
+    });
+
+  } catch (error) {
+    console.error('Error fixing emergency requests:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to fix emergency requests',
       error: error.message
     });
   }

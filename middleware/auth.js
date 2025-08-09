@@ -89,7 +89,26 @@ const auth = async (req, res, next) => {
         return next();
       }
 
-      // For regular users
+      // For students, look in Student collection
+      if (decoded.role === 'student') {
+        const Student = require('../models/Student');
+        const student = await Student.findById(decoded.id);
+        if (!student) {
+          throw new Error('Student not found');
+        }
+
+        req.user = student;
+        console.log('✅ Student authenticated:', {
+          id: student._id,
+          name: student.name,
+          rollNumber: student.rollNumber,
+          hostelBlock: student.hostelBlock,
+          floor: student.floor
+        });
+        return next();
+      }
+
+      // For regular staff users
       const user = await User.findById(decoded.id);
       if (!user) {
         throw new Error('User not found');

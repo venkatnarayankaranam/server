@@ -3,7 +3,29 @@ const router = express.Router();
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const User = require('../models/User');
+const Student = require('../models/Student');
 const { auth } = require('../middleware/auth'); // Import the auth middleware
+
+// Debug endpoint to test student lookup
+router.get('/debug-student/:rollNumber', async (req, res) => {
+  try {
+    const { rollNumber } = req.params;
+    console.log('🔍 Debug: Looking for student with roll number:', rollNumber);
+    
+    const student = await Student.findOne({ rollNumber: rollNumber.toUpperCase() });
+    if (student) {
+      console.log('✅ Debug: Student found:', student.name);
+      res.json({ success: true, found: true, name: student.name, rollNumber: student.rollNumber });
+    } else {
+      console.log('❌ Debug: Student not found');
+      const studentExact = await Student.findOne({ rollNumber: rollNumber });
+      res.json({ success: true, found: false, triedUppercase: rollNumber.toUpperCase(), triedExact: rollNumber, foundExact: !!studentExact });
+    }
+  } catch (error) {
+    console.error('❌ Debug endpoint error:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
 
 const ADMIN_CREDENTIALS = {
   "floorincharge@kietgroup.com": {
@@ -54,31 +76,45 @@ router.post('/register', async (req, res) => {
       semester,
     } = req.body;
 
-    // Validate required fields
-    if (!email || !name || !rollNumber || !hostelBlock || !floor || !roomNumber) {
+    // Validate required fields - email is now optional for students
+    if (!name || !rollNumber || !hostelBlock || !floor || !roomNumber) {
       return res.status(400).json({ 
         success: false, 
-        message: 'Missing required fields: email, name, rollNumber, hostelBlock, floor, roomNumber are required' 
+        message: 'Missing required fields: name, rollNumber, hostelBlock, floor, roomNumber are required' 
       });
     }
 
-    let user = await User.findOne({ email });
-    if (user) {
-      return res.status(400).json({ success: false, message: 'User already exists' });
+    // Check if student with roll number already exists
+    let existingStudent = await Student.findOne({ rollNumber });
+    if (existingStudent) {
+      return res.status(400).json({ success: false, message: 'Student with this roll number already exists' });
+    }
+
+    // If email is provided, check if it already exists in both collections
+    if (email) {
+      existingStudent = await Student.findOne({ email });
+      if (existingStudent) {
+        return res.status(400).json({ success: false, message: 'Student with this email already exists' });
+      }
+      
+      const existingUser = await User.findOne({ email });
+      if (existingUser) {
+        return res.status(400).json({ success: false, message: 'User with this email already exists' });
+      }
     }
 
     // Format floor value
-    const formattedFloor = User.formatFloor(floor);
+    const formattedFloor = Student.formatFloor(floor);
     
     // Format hostel block (ensure proper format)
     const formattedHostelBlock = hostelBlock?.includes('-Block') ? hostelBlock : `${hostelBlock}-Block`;
 
-    const salt = await bcrypt.genSalt(10);
-    const hashedPassword = await bcrypt.hash(password, salt);
+    // Use roll number as default password if none provided
+    const defaultPassword = password || rollNumber;
 
-    const userData = {
-      email,
-      password: hashedPassword,
+    const studentData = {
+      email: email || null, // Email is optional for students
+      password: defaultPassword, // Will be hashed by the pre-save middleware
       name,
       rollNumber,
       phoneNumber,
@@ -91,12 +127,12 @@ router.post('/register', async (req, res) => {
       role: 'student',
     };
 
-    console.log('📝 Creating user with data:', {
-      ...userData,
+    console.log('📝 Creating student with data:', {
+      ...studentData,
       password: '[HIDDEN]'
     });
 
-    user = new User(userData);
+    user = new Student(studentData);
     await user.save();
 
     console.log('✅ Student registered successfully:', {
@@ -169,16 +205,77 @@ router.post('/login', async (req, res) => {
       return res.status(400).json({ success: false, message: 'Invalid credentials' });
     }
 
-    // Handle regular users
-    const user = await User.findOne({ email });
+    // Handle student login with roll number or regular users with email
+    let user;
+    
+    // Check if the email looks like a roll number (contains numbers and letters, no @ symbol)
+    const isRollNumber = /^[A-Za-z0-9]+$/.test(email) && !email.includes('@');
+    
+    console.log('🔍 Login attempt:', { email, isRollNumber });
+    
+    if (isRollNumber) {
+      // Try to find student by roll number in students collection
+      console.log('🎓 Searching for student with roll number:', email.toUpperCase());
+      user = await Student.findOne({ rollNumber: email.toUpperCase() });
+      
+      if (!user) {
+        // Also try exact case match
+        console.log('🎓 Trying exact case match for:', email);
+        user = await Student.findOne({ rollNumber: email });
+      }
+      
+      if (user) {
+        console.log('✅ Student found:', user.name, user.rollNumber);
+      } else {
+        console.log('❌ No student found with roll number:', email);
+      }
+    } else {
+      // Try to find user by email (for staff/admin)
+      console.log('👨‍💼 Searching for user with email:', email);
+      user = await User.findOne({ email });
+      
+      if (user) {
+        console.log('✅ User found:', user.email, user.role);
+      } else {
+        console.log('❌ No user found with email:', email);
+      }
+    }
+
     if (!user) {
+      console.log('❌ Login failed: User not found');
       return res.status(400).json({ success: false, message: 'User not found' });
     }
 
-    const isMatch = await bcrypt.compare(password, user.password);
+    console.log('🔐 Comparing password for user:', user.name || user.email);
+    
+    let isMatch = false;
+    
+    // For student login with roll number
+    if (isRollNumber && user.role === 'student') {
+      console.log('🎓 Student roll number login detected');
+      
+      // First try regular password comparison
+      isMatch = await bcrypt.compare(password, user.password);
+      
+      // If regular comparison fails and password equals roll number, 
+      // the student is trying to use their roll number as password
+      if (!isMatch && password === user.rollNumber) {
+        console.log('🔧 Student using roll number as password - allowing login');
+        isMatch = true; // Allow login for students using roll number as password
+      }
+    } else {
+      // Regular password comparison for staff/admin users
+      isMatch = await bcrypt.compare(password, user.password);
+    }
+    
+    console.log('🔐 Password match result:', isMatch);
+    
     if (!isMatch) {
+      console.log('❌ Login failed: Invalid credentials');
       return res.status(400).json({ success: false, message: 'Invalid credentials' });
     }
+
+    console.log('✅ Login successful for:', user.name || user.email);
 
     // Prepare token data with proper fallbacks
     const tokenData = {

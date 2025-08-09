@@ -4,7 +4,7 @@ const QRCode = require('qrcode');
 const homePermissionRequestSchema = new mongoose.Schema({
   studentId: {
     type: mongoose.Schema.Types.ObjectId,
-    ref: 'User',
+    ref: 'Student',
     required: true,
   },
   goingDate: {
@@ -22,6 +22,11 @@ const homePermissionRequestSchema = new mongoose.Schema({
   purpose: {
     type: String,
     required: true
+  },
+  category: {
+    type: String,
+    enum: ['normal', 'emergency'],
+    default: 'normal'
   },
   parentPhoneNumber: {
     type: String,
@@ -47,7 +52,7 @@ const homePermissionRequestSchema = new mongoose.Schema({
   currentLevel: {
     type: String,
     enum: ['floor-incharge', 'hostel-incharge', 'warden', 'completed'],
-    default: 'floor-incharge'
+    // No default - will be set based on category in pre-save middleware
   },
   approvalFlags: {
     floorIncharge: {
@@ -251,9 +256,13 @@ homePermissionRequestSchema.methods.validateApprovalSequence = function(newAppro
 
   const existingApprovals = this.approvalFlow || [];
   
-  // First approval must be from floor incharge
-  if (existingApprovals.length === 0 && newLevel !== 1) {
-    throw new Error('First approval must be from Floor Incharge');
+  // First approval validation - handle emergency requests
+  if (existingApprovals.length === 0) {
+    if (this.category === 'emergency' && newLevel !== 2) {
+      throw new Error('First approval for emergency requests must be from Hostel Incharge');
+    } else if (this.category === 'normal' && newLevel !== 1) {
+      throw new Error('First approval for normal requests must be from Floor Incharge');
+    }
   }
 
   // Get last valid approval
@@ -270,11 +279,19 @@ homePermissionRequestSchema.methods.validateApprovalSequence = function(newAppro
       return true;
     }
 
-    // Check sequence
-    if (newLevel !== lastLevel + 1) {
-      throw new Error(
-        `Invalid approval sequence: Expected level ${lastLevel + 1}, got ${newLevel}`
-      );
+    // Check sequence - handle emergency requests differently
+    if (this.category === 'emergency') {
+      // For emergency: hostel-incharge (level 2) can be followed by warden (level 3) or complete
+      if (lastLevel === 2 && newLevel === 3) {
+        return true; // Valid: hostel-incharge -> warden
+      }
+    } else {
+      // Normal sequence validation for regular requests
+      if (newLevel !== lastLevel + 1) {
+        throw new Error(
+          `Invalid approval sequence: Expected level ${lastLevel + 1}, got ${newLevel}`
+        );
+      }
     }
   }
 
@@ -283,6 +300,17 @@ homePermissionRequestSchema.methods.validateApprovalSequence = function(newAppro
 
 homePermissionRequestSchema.pre('save', function(next) {
   try {
+    // Set initial currentLevel based on category for new requests
+    if (this.isNew) {
+      if (this.category === 'emergency') {
+        this.currentLevel = 'hostel-incharge';
+        console.log('🚨 Emergency request - setting currentLevel to hostel-incharge:', this._id);
+      } else {
+        this.currentLevel = 'floor-incharge';
+        console.log('📋 Normal request - setting currentLevel to floor-incharge:', this._id);
+      }
+    }
+
     if (this.isModified('approvalFlow') && this.approvalFlow?.length > 0) {
       // Get latest approval
       const latestApproval = this.approvalFlow[this.approvalFlow.length - 1];
@@ -306,7 +334,13 @@ homePermissionRequestSchema.pre('save', function(next) {
             this.approvalFlags.hostelIncharge.timestamp = latestApproval.timestamp || new Date();
             this.approvalFlags.hostelIncharge.remarks = latestApproval.remarks || '';
             if (this.currentLevel === 'hostel-incharge') {
-              this.currentLevel = 'warden';
+              // For emergency requests, directly generate QR code and complete
+              if (this.category === 'emergency') {
+                this.currentLevel = 'completed';
+                this.status = 'approved';
+              } else {
+                this.currentLevel = 'warden';
+              }
             }
             break;
           case '3':

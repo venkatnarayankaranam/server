@@ -3,14 +3,30 @@ const bcrypt = require('bcryptjs');
 
 const userSchema = new mongoose.Schema({
   name: { type: String, required: true },
-  email: { type: String, required: true, unique: true },
+  email: { 
+    type: String, 
+    required: function() {
+      // Email is optional for students, required for others
+      return this.role !== 'student';
+    },
+    unique: true,
+    sparse: true // Allow null/undefined values to coexist
+  },
   password: { type: String, required: true },
   role: {
     type: String,
     enum: ['student', 'floor-incharge', 'hostel-incharge', 'warden', 'security', 'gate'],
     required: true
   },
-  rollNumber: { type: String, sparse: true },
+  rollNumber: { 
+    type: String, 
+    unique: true, 
+    sparse: true,
+    required: function() {
+      // Roll number is required for students
+      return this.role === 'student';
+    }
+  },
   phoneNumber: { type: String },
   parentPhoneNumber: { type: String },
   hostelBlock: { 

@@ -25,7 +25,11 @@ router.get('/dashboard', auth, checkRole(['security', 'admin', 'warden', 'gate']
           $lte: endOfDay
         }
       })
-      .populate('studentId', 'name rollNumber hostelBlock floor roomNumber phoneNumber')
+      .populate({
+        path: 'studentId',
+        model: 'Student',
+        select: 'name rollNumber hostelBlock floor roomNumber phoneNumber'
+      })
       .sort({ 'gateActivity.scannedAt': -1 })
       .exec(),
       
@@ -38,7 +42,11 @@ router.get('/dashboard', auth, checkRole(['security', 'admin', 'warden', 'gate']
             $lte: endOfDay
           }
         })
-        .populate('studentId', 'name rollNumber hostelBlock floor roomNumber phoneNumber')
+        .populate({
+        path: 'studentId',
+        model: 'Student',
+        select: 'name rollNumber hostelBlock floor roomNumber phoneNumber'
+      })
         .sort({ 'gateActivity.scannedAt': -1 })
         .exec();
       })()
@@ -179,16 +187,33 @@ router.get('/search-students', auth, checkRole(['security', 'admin', 'warden', '
     }
 
     const User = require('../models/User');
+    const Student = require('../models/Student');
     const searchQuery = q.trim();
     
-    // Search by name or roll number
-    const students = await User.find({
-      role: 'student',
-      $or: [
-        { name: { $regex: searchQuery, $options: 'i' } },
-        { rollNumber: { $regex: searchQuery, $options: 'i' } }
-      ]
-    }).select('name rollNumber hostelBlock roomNumber phoneNumber').limit(10);
+    // Search by name or roll number in both User and Student models
+    const [userStudents, modelStudents] = await Promise.all([
+      User.find({
+        role: 'student',
+        $or: [
+          { name: { $regex: searchQuery, $options: 'i' } },
+          { rollNumber: { $regex: searchQuery, $options: 'i' } }
+        ]
+      }).select('name rollNumber hostelBlock roomNumber phoneNumber').limit(10),
+      
+      Student.find({
+        $or: [
+          { name: { $regex: searchQuery, $options: 'i' } },
+          { rollNumber: { $regex: searchQuery, $options: 'i' } }
+        ]
+      }).select('name rollNumber hostelBlock roomNumber phoneNumber').limit(10)
+    ]);
+    
+    // Combine results and remove duplicates by ID
+    const studentMap = new Map();
+    [...userStudents, ...modelStudents].forEach(student => {
+      studentMap.set(student._id.toString(), student);
+    });
+    const students = Array.from(studentMap.values()).slice(0, 10);
 
     console.log(`📋 Found ${students.length} students matching "${searchQuery}"`);
 
@@ -325,6 +350,7 @@ router.post('/manual-checkin', auth, checkRole(['security', 'admin', 'warden', '
     }
 
     const User = require('../models/User');
+    const Student = require('../models/Student');
     
     // Find the gate user's ObjectId by email
     let gateUserId = req.user.id;
@@ -335,12 +361,15 @@ router.post('/manual-checkin', auth, checkRole(['security', 'admin', 'warden', '
       }
     }
 
-    // Find the student
+    // Find the student - check both User and Student models
     console.log('🔍 Looking for student with ID:', studentId);
-    const student = await User.findById(studentId);
-    console.log('👤 Student found:', student ? `${student.name} (${student.role})` : 'Not found');
+    let student = await Student.findById(studentId);
+    if (!student) {
+      student = await User.findById(studentId);
+    }
+    console.log('👤 Student found:', student ? `${student.name} (${student.role || 'student'})` : 'Not found');
     
-    if (!student || student.role !== 'student') {
+    if (!student || (student.role && student.role !== 'student')) {
       console.log('❌ Student not found or not a student role');
       return res.status(404).json({
         success: false,
@@ -393,34 +422,54 @@ router.post('/manual-checkin', auth, checkRole(['security', 'admin', 'warden', '
       time: a.scannedAt.toISOString() 
     })));
     
-    // Find the most recent activity (same as dashboard logic)
+    // Handle cases where student has no gate activity today (manual check-in scenarios)
+    let outgoingRequest = null;
+    let mostRecentActivity = null;
+    
     if (activityLog.length === 0) {
-      console.log('❌ No gate activities found for student today');
-      return res.status(400).json({
-        success: false,
-        message: 'No gate activity found for this student today'
+      console.log('⚠️ No gate activities found for student today - checking for existing approved requests');
+      
+      // For manual check-ins, find any approved request that could be the basis for check-in
+      const approvedRequests = await OutingRequest.find({ 
+        studentId: studentId,
+        status: 'approved',
+        outingDate: {
+          $gte: new Date(today.getTime() - 7 * 24 * 60 * 60 * 1000), // Last 7 days
+          $lte: endOfDay
+        }
+      }).sort({ createdAt: -1 }).limit(1);
+      
+      if (approvedRequests.length === 0) {
+        console.log('❌ No approved outing requests found for student');
+        return res.status(400).json({
+          success: false,
+          message: 'No approved outing requests found for this student. Student must have an approved outing request to check in.'
+        });
+      }
+      
+      outgoingRequest = approvedRequests[0];
+      console.log('✅ Found approved request for manual check-in:', outgoingRequest._id);
+    } else {
+      // Sort by time and get the most recent (same as dashboard logic)
+      activityLog.sort((a, b) => new Date(b.scannedAt) - new Date(a.scannedAt));
+      mostRecentActivity = activityLog[0];
+      
+      console.log('🎯 Most recent activity:', {
+        type: mostRecentActivity.type,
+        time: mostRecentActivity.scannedAt.toISOString()
       });
+      
+      // Check if student is currently out (most recent activity is OUT)
+      if (mostRecentActivity.type !== 'OUT' && mostRecentActivity.type !== 'OUTGOING') {
+        console.log('❌ Student is not currently out - most recent activity is:', mostRecentActivity.type);
+        return res.status(400).json({
+          success: false,
+          message: 'Student is not currently out (most recent activity is check-in)'
+        });
+      }
+      
+      outgoingRequest = mostRecentActivity.request;
     }
-    
-    // Sort by time and get the most recent (same as dashboard logic)
-    activityLog.sort((a, b) => new Date(b.scannedAt) - new Date(a.scannedAt));
-    const mostRecentActivity = activityLog[0];
-    
-    console.log('🎯 Most recent activity:', {
-      type: mostRecentActivity.type,
-      time: mostRecentActivity.scannedAt.toISOString()
-    });
-    
-    // Check if student is currently out (most recent activity is OUT)
-    if (mostRecentActivity.type !== 'OUT' && mostRecentActivity.type !== 'OUTGOING') {
-      console.log('❌ Student is not currently out - most recent activity is:', mostRecentActivity.type);
-      return res.status(400).json({
-        success: false,
-        message: 'Student is not currently out (most recent activity is check-in)'
-      });
-    }
-    
-    const outgoingRequest = mostRecentActivity.request;
     
     console.log('✅ Valid check-in request found:', {
       studentName: student.name,
@@ -472,6 +521,65 @@ router.post('/manual-checkin', auth, checkRole(['security', 'admin', 'warden', '
     }
 
     console.log('✅ Manual check-in successful for:', student.name, 'at', checkInTime.toISOString(), isSuspicious ? '(SUSPICIOUS ACTIVITY)' : '');
+
+    // If suspicious, create a disciplinary action and notify student
+    if (isSuspicious) {
+      try {
+        const DisciplinaryAction = require('../models/DisciplinaryAction');
+        const Notification = require('../models/Notification');
+        const action = await DisciplinaryAction.create({
+          studentId: student._id,
+          createdBy: gateUserId,
+          createdByRole: req.user?.role,
+          source: 'gate',
+          category: 'security',
+          title: 'Suspicious activity at gate',
+          description: suspiciousComment || 'Reported by security at gate',
+          severity: 'medium',
+          gateContext: {
+            outingRequestId: outgoingRequest._id,
+            gateActivityId: outgoingRequest.gateActivity[outgoingRequest.gateActivity.length - 1]?._id,
+            comment: suspiciousComment,
+            location,
+            scannedAt: checkInTime,
+          }
+        });
+        const notif = await Notification.create({
+          userId: student._id,
+          title: 'Security Alert',
+          message: `A security alert was recorded at the gate: ${suspiciousComment || 'See details in your dashboard.'}`,
+          type: 'securityAlert',
+          referenceId: action._id,
+        });
+        // Also notify hostel incharge(s) for this block
+        try {
+          const User = require('../models/User');
+          const { getIO } = require('../config/socket');
+          const his = await User.find({ role: 'hostel-incharge', hostelBlock: student.hostelBlock });
+          for (const hi of his) {
+            await Notification.create({
+              userId: hi._id,
+              title: 'Suspicious Activity Near Gate',
+              message: `${student.name} (${student.rollNumber}) flagged at ${location}. ${suspiciousComment || ''}`.trim(),
+              type: 'securityAlert',
+              referenceId: action._id,
+            });
+            try {
+              getIO().of('/hostel-incharge').to(hi._id.toString()).emit('notification', {
+                title: 'Suspicious Activity Near Gate',
+                message: `${student.name} (${student.rollNumber}) at ${location}.`,
+                type: 'securityAlert',
+                createdAt: new Date().toISOString()
+              });
+            } catch {}
+          }
+        } catch (e) {
+          console.error('Failed to notify hostel incharge for suspicious activity:', e);
+        }
+      } catch (discErr) {
+        console.error('Failed to create disciplinary action/notification for suspicious activity:', discErr);
+      }
+    }
 
     res.json({
       success: true,
@@ -1257,12 +1365,15 @@ router.post('/scan', auth, checkRole(['security', 'admin', 'warden', 'gate']), a
         scannedAt: gateActivity.scannedAt,
         location: location,
         requestType: 'home-permission',
+        category: request.category || 'normal',
+        isEmergency: request.category === 'emergency',
         // Home permission specific data
         homePermission: {
           homeTownName: request.homeTownName,
           goingDate: request.goingDate,
           incomingDate: request.incomingDate,
           purpose: request.purpose,
+          category: request.category || 'normal',
           status: request.status
         }
       };
@@ -1283,6 +1394,8 @@ router.post('/scan', auth, checkRole(['security', 'admin', 'warden', 'gate']), a
         goingDate: request.goingDate,
         incomingDate: request.incomingDate,
         homeTownName: request.homeTownName,
+        category: request.category || 'normal',
+        isEmergency: request.category === 'emergency',
         requestType: 'home-permission'
       } : {
         id: request._id,
@@ -1290,6 +1403,8 @@ router.post('/scan', auth, checkRole(['security', 'admin', 'warden', 'gate']), a
         outingDate: request.outingDate,
         outingTime: request.outingTime,
         returnTime: request.returnTime,
+        category: request.category || 'normal',
+        isEmergency: request.category === 'emergency',
         requestType: 'outing'
       }
     };
@@ -1867,7 +1982,11 @@ router.get('/suspicious-students/:hostelBlock?', auth, checkRole(['hostel-inchar
     
     // Find requests with suspicious gate activity
     const suspiciousRequests = await OutingRequest.find(matchCriteria)
-      .populate('studentId', 'name rollNumber hostelBlock floor roomNumber phoneNumber')
+      .populate({
+        path: 'studentId',
+        model: 'Student',
+        select: 'name rollNumber hostelBlock floor roomNumber phoneNumber'
+      })
       .sort({ 'gateActivity.scannedAt': -1 })
       .exec();
     

@@ -73,8 +73,27 @@ exports.handleApproval = async (req, res) => {
         request.approvalFlags.hostelIncharge.isApproved = true;
         request.approvalFlags.hostelIncharge.timestamp = new Date();
         request.approvalFlags.hostelIncharge.remarks = remarks;
-        // Move to warden level after hostel incharge approval
-        request.currentLevel = 'warden';
+        
+        // For emergency requests, directly approve and generate QR
+        if (request.category === 'emergency') {
+          request.status = 'approved';
+          request.currentLevel = 'completed';
+          
+          // Generate outgoing QR code for emergency requests
+          const qrPayload = {
+            requestId: request._id.toString(),
+            studentId: request.studentId._id.toString(),
+            type: 'outgoing',
+            category: 'emergency',
+            isEmergency: true,
+            generatedAt: new Date()
+          };
+          request.qrCode.outgoing.data = await QRCode.toDataURL(JSON.stringify(qrPayload));
+          request.qrCode.outgoing.generatedAt = new Date();
+        } else {
+          // Normal flow - proceed to warden
+          request.currentLevel = 'warden';
+        }
       } else {
         // Rejected by hostel incharge
         request.approvalFlags.hostelIncharge.isApproved = false;
@@ -84,11 +103,20 @@ exports.handleApproval = async (req, res) => {
         request.currentLevel = 'completed';
       }
     } else if (userRole === 'warden') {
-      // Can only approve if both floor incharge and hostel incharge approved
-      if (!request.approvalFlags.floorIncharge.isApproved || !request.approvalFlags.hostelIncharge.isApproved) {
+      // For emergency requests, only require hostel incharge approval
+      // For normal requests, require both floor incharge and hostel incharge approval
+      const isEmergency = request.category === 'emergency';
+      const requiredApprovals = isEmergency 
+        ? request.approvalFlags.hostelIncharge.isApproved
+        : (request.approvalFlags.floorIncharge.isApproved && request.approvalFlags.hostelIncharge.isApproved);
+        
+      if (!requiredApprovals) {
+        const message = isEmergency 
+          ? 'Hostel Incharge approval required before Warden approval for emergency requests.'
+          : 'Both Floor Incharge and Hostel Incharge approval required before Warden approval.';
         return res.status(400).json({
           success: false,
-          message: 'Both Floor Incharge and Hostel Incharge approval required before Warden approval.'
+          message
         });
       }
 
@@ -373,22 +401,23 @@ exports.verifyQRCode = async (req, res) => {
 // Helper method to send notifications to students
 exports.sendStudentNotification = async (request, approvalStatus, userRole) => {
   try {
+    const isEmergency = request.category === 'emergency';
     let title, message;
     
     if (approvalStatus === 'approved') {
       if (request.status === 'approved' && request.currentLevel === 'completed') {
-        // Final approval from warden
-        title = 'Outing Request Approved';
-        message = 'Your outing request has been accepted. QR code generated successfully.';
+        // Final approval - for emergency, this happens at hostel incharge level
+        title = `${isEmergency ? 'EMERGENCY ' : ''}Outing Request Approved`;
+        message = `Your ${isEmergency ? 'emergency ' : ''}outing request has been accepted. QR code generated successfully.${isEmergency ? ' Please proceed immediately.' : ''}`;
       } else {
         // Intermediate approval
-        title = 'Outing Request Updated';
-        message = `Your outing request has been approved by ${userRole.replace('-', ' ')} and moved to the next level.`;
+        title = `${isEmergency ? 'EMERGENCY ' : ''}Outing Request Updated`;
+        message = `Your ${isEmergency ? 'emergency ' : ''}outing request has been approved by ${userRole.replace('-', ' ')} and moved to the next level.`;
       }
     } else {
       // Rejected
-      title = 'Outing Request Denied';
-      message = 'Your outing request has been denied.';
+      title = `${isEmergency ? 'EMERGENCY ' : ''}Outing Request Denied`;
+      message = `Your ${isEmergency ? 'emergency ' : ''}outing request has been denied.`;
     }
 
     // Create notification
@@ -398,6 +427,7 @@ exports.sendStudentNotification = async (request, approvalStatus, userRole) => {
       message,
       type: 'outingUpdate',
       referenceId: request._id,
+      priority: isEmergency ? 'high' : 'normal',
       read: false
     });
 

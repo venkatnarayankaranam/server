@@ -16,7 +16,7 @@ const notificationSchema = new mongoose.Schema({
   },
   type: {
     type: String,
-    enum: ['outingRequest', 'outingUpdate', 'system'],
+    enum: ['outingRequest', 'outingUpdate', 'system', 'disciplinary', 'securityAlert'],
     required: true
   },
   referenceId: {

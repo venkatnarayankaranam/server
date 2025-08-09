@@ -23,7 +23,8 @@ const connectWithRetry = (retries = 5, delay = 5000) => {
       serverSelectionTimeoutMS: 10000, // Increased timeout
       socketTimeoutMS: 45000,
       retryWrites: true,
-      w: 'majority'
+      w: 'majority',
+      dbName: process.env.MONGODB_DB || 'outing-system'
     })
     .then(async () => {
       console.log('🚀 Connected to MongoDB Atlas');
@@ -116,9 +117,10 @@ app.use((req, res, next) => {
 const outingRoutes = require('./routes/outings');
 const userRoutes = require('./routes/users');
 const gateRoutes = require('./routes/gate');
-const studentRoutes = require('./routes/student');
 const reportRoutes = require('./routes/reports');
 const homePermissionRoutes = require('./routes/homePermissions');
+const disciplinaryRoutes = require('./routes/disciplinary');
+const studentsRoutes = require('./routes/students');
 
 // Register routes
 app.use('/auth', require('./routes/auth'));
@@ -127,7 +129,9 @@ app.use('/home-permissions', homePermissionRoutes);
 app.use('/dashboard', require('./routes/dashboard'));
 app.use('/users', userRoutes);
 app.use('/gate', gateRoutes);
-app.use('/students', studentRoutes);
+app.use('/disciplinary', disciplinaryRoutes);
+app.use('/students', studentsRoutes);
+
 app.use('/reports', reportRoutes);
 
 // Start QR scheduler for automatic incoming QR generation and midnight expiry

@@ -3,6 +3,7 @@ const router = express.Router();
 const { auth, checkRole } = require('../middleware/auth');
 const OutingRequest = require('../models/OutingRequest');
 const User = require('../models/User');
+const Notification = require('../models/Notification');
 
 // Student Dashboard Routes
 router.get('/student/requests', auth, checkRole(['student']), async (req, res) => {
@@ -12,7 +13,7 @@ router.get('/student/requests', auth, checkRole(['student']), async (req, res) =
     const [requests, stats] = await Promise.all([
       OutingRequest.find({ studentId: req.user.id })
         .sort({ createdAt: -1 })
-        .select('outingDate outingTime returnTime status purpose createdAt currentLevel approvalFlags approvalFlow qrCode')
+        .select('outingDate outingTime returnTime status purpose createdAt currentLevel approvalFlags approvalFlow qrCode gateActivity category')
         .lean(),
       {
         pending: await OutingRequest.countDocuments({ 
@@ -32,6 +33,28 @@ router.get('/student/requests', auth, checkRole(['student']), async (req, res) =
 
     console.log(`Found ${requests.length} requests for student ${req.user.id}`);
 
+    // Compute robust completion state
+    const isRequestCompleted = (r) => {
+      const isFullyApproved = r.status === 'approved' && r.currentLevel === 'completed';
+      if (!isFullyApproved) return false;
+      const outgoingScanned = !!(r.qrCode?.outgoing?.isExpired && r.qrCode?.outgoing?.scannedAt);
+      const incomingScanned = !!(r.qrCode?.incoming?.isExpired && r.qrCode?.incoming?.scannedAt);
+      const isEmergency = r.category === 'emergency';
+      const hasExit = Array.isArray(r.gateActivity) && r.gateActivity.some(a => a?.type === 'OUT' || a?.type === 'OUTGOING');
+      const hasEntry = Array.isArray(r.gateActivity) && r.gateActivity.some(a => a?.type === 'IN' || a?.type === 'INCOMING');
+      if (isEmergency) {
+        return outgoingScanned || hasExit;
+      }
+      const qrCleared = !r.qrCode?.outgoing?.data && !r.qrCode?.incoming?.data;
+      return (outgoingScanned && incomingScanned) || (hasExit && hasEntry) || qrCleared;
+    };
+
+    // Load recent notifications for this student
+    const notifications = await Notification.find({ userId: req.user.id })
+      .sort({ createdAt: -1 })
+      .limit(20)
+      .lean();
+
     res.json({ 
       success: true, 
       requests: requests.map(req => ({
@@ -43,15 +66,19 @@ router.get('/student/requests', auth, checkRole(['student']), async (req, res) =
         purpose: req.purpose,
         createdAt: req.createdAt,
         currentLevel: req.currentLevel,
+        category: req.category || 'normal',
         approvalStatus: {
           floorIncharge: req.approvalFlags?.floorIncharge?.isApproved ? 'approved' : 'waiting',
           hostelIncharge: req.approvalFlags?.hostelIncharge?.isApproved ? 'approved' : 'waiting',
           warden: req.approvalFlags?.warden?.isApproved ? 'approved' : 'waiting'
         },
         qrCode: req.qrCode || null,
-        isFullyApproved: req.status === 'approved' && req.currentLevel === 'completed'
+        isFullyApproved: req.status === 'approved' && req.currentLevel === 'completed',
+        // New robust flag used by client
+        isCompleted: isRequestCompleted(req)
       })),
-      stats 
+      stats,
+      notifications
     });
   } catch (error) {
     console.error('Error fetching student requests:', error);
@@ -112,7 +139,11 @@ router.get('/floor-incharge/requests', auth, checkRole(['floor-incharge']), asyn
       currentLevel: 'floor-incharge',
       hostelBlock: req.user.hostelBlock,
       floor: req.user.floor
-    }).populate('studentId', 'name rollNumber roomNumber');
+    }).populate({
+      path: 'studentId',
+      model: 'Student',
+      select: 'name rollNumber roomNumber'
+    });
 
     console.log(`📋 Found ${requests.length} pending requests for floor incharge`);
 
@@ -167,12 +198,16 @@ router.get('/hostel-incharge/requests', auth, checkRole(['hostel-incharge']), as
     const requests = await OutingRequest.find({
       currentLevel: 'hostel-incharge',
       hostelBlock: { $in: req.user.assignedBlocks }
-    }).populate('studentId', 'name rollNumber roomNumber floor hostelBlock');
+    }).populate({
+      path: 'studentId',
+      model: 'Student',
+      select: 'name rollNumber roomNumber floor hostelBlock'
+    });
 
     // Get statistics
+    const Student = require('../models/Student');
     const stats = {
-      totalStudents: await User.countDocuments({
-        role: 'student',
+      totalStudents: await Student.countDocuments({
         hostelBlock: { $in: req.user.assignedBlocks }
       }),
       pending: await OutingRequest.countDocuments({
@@ -208,9 +243,13 @@ router.get('/warden/requests', auth, checkRole(['warden']), async (req, res) => 
       OutingRequest.find({
         currentLevel: 'warden',
         'approvalFlags.hostelIncharge.isApproved': true
-      }).populate('studentId', 'name rollNumber hostelBlock floor roomNumber'),
+      }).populate({
+        path: 'studentId',
+        model: 'Student',
+        select: 'name rollNumber hostelBlock floor roomNumber'
+      }),
       
-      User.countDocuments({ role: 'student' }),
+      require('../models/Student').countDocuments({}),
       
       OutingRequest.countDocuments({
         status: 'approved',

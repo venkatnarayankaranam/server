@@ -34,16 +34,30 @@ const generatePDF = (res, { title, requests, role, statistics, dateRange }) => {
     doc.rect(50, statsY, 500, statsHeight).stroke();
     
     doc.fontSize(10).font('Helvetica');
-    const statsText = [
-      `Total Approved Requests: ${statistics.totalRequests}`,
-      `Block Distribution - D-Block: ${statistics.byBlock?.['D-Block'] || 0} | E-Block: ${statistics.byBlock?.['E-Block'] || 0} | Womens-Block: ${statistics.byBlock?.['Womens-Block'] || 0}`,
-      `Time Period - This Week: ${statistics.byDateRange?.thisWeek || 0} | This Month: ${statistics.byDateRange?.thisMonth || 0}`,
-      `Report Generated: ${new Date().toLocaleString()}`
-    ];
+    
+    // Handle different statistics structures
+    let statsText = [];
+    if (statistics.totalRequests !== undefined) {
+      // New statistics format
+      statsText = [
+        `Total Approved Requests: ${statistics.totalRequests || 0}`,
+        `Block Distribution - D-Block: ${statistics.byBlock?.['D-Block'] || 0} | E-Block: ${statistics.byBlock?.['E-Block'] || 0} | Womens-Block: ${statistics.byBlock?.['Womens-Block'] || 0}`,
+        `Time Period - This Week: ${statistics.byDateRange?.thisWeek || 0} | This Month: ${statistics.byDateRange?.thisMonth || 0}`,
+        `Report Generated: ${new Date().toLocaleString()}`
+      ];
+    } else {
+      // Legacy statistics format
+      statsText = [
+        `Total Outings: ${statistics.totalOutings || 0}`,
+        `Approved: ${statistics.approvedCount || 0} | Pending: ${statistics.pendingCount || 0} | Denied: ${statistics.deniedCount || 0}`,
+        `Total Returns: ${statistics.totalReturns || 0}`,
+        `Report Generated: ${new Date().toLocaleString()}`
+      ];
+    }
     
     statsText.forEach((text, index) => {
-      const x = 60 + (index % 3) * 150;
-      const y = statsY + 15 + Math.floor(index / 3) * 20;
+      const x = 60 + (index % 2) * 250;
+      const y = statsY + 15 + Math.floor(index / 2) * 20;
       doc.text(text, x, y);
     });
     
@@ -51,18 +65,21 @@ const generatePDF = (res, { title, requests, role, statistics, dateRange }) => {
     doc.moveDown();
   }
 
-  // Define table layout
+  // Define table layout - add columns for approval remarks (FI/HI)
   const tableTop = doc.y + 20;
   const columnSpacing = {
     srNo: 30,
-    name: 100,
-    rollNo: 80,
-    blockRoom: 80,
-    contact: 100,
-    branch: 80,
-    outTime: 70,
-    inTime: 70,
-    purpose: 120
+    name: 80,
+    rollNo: 70,
+    blockRoom: 70,
+    contact: 70,
+    branch: 50,
+    outTime: 60,
+    inTime: 60,
+    purpose: 80,
+    fiRemark: 120,
+    hiRemark: 120,
+    approvedBy: 70
   };
 
   let currentY = tableTop;
@@ -80,7 +97,10 @@ const generatePDF = (res, { title, requests, role, statistics, dateRange }) => {
     { width: columnSpacing.branch, text: 'Branch' },
     { width: columnSpacing.outTime, text: 'Out Time' },
     { width: columnSpacing.inTime, text: 'In Time' },
-    { width: columnSpacing.purpose, text: 'Purpose' }
+    { width: columnSpacing.purpose, text: 'Purpose' },
+    { width: columnSpacing.fiRemark, text: 'FI Remarks' },
+    { width: columnSpacing.hiRemark, text: 'HI Remarks' },
+    { width: columnSpacing.approvedBy, text: 'Approved By' }
   ];
 
   // Draw header background
@@ -110,6 +130,25 @@ const generatePDF = (res, { title, requests, role, statistics, dateRange }) => {
     }
 
     currentX = 50;
+    
+    // Extract approval information and remarks
+    let approvedBy = 'N/A';
+    let fiRemarks = '';
+    let hiRemarks = '';
+    if (request.approvalFlow && request.approvalFlow.length > 0) {
+      const fi = request.approvalFlow.find(flow => flow.level === 'floor-incharge' && flow.status === 'approved');
+      const hi = request.approvalFlow.find(flow => flow.level === 'hostel-incharge' && flow.status === 'approved');
+      if (fi) {
+        fiRemarks = fi.remarks || '';
+        approvedBy = fi.approvedBy || 'Floor Incharge';
+      }
+      if (hi) {
+        hiRemarks = hi.remarks || '';
+        // Prefer HI as approvedBy if warden/final not present and FI missing approver
+        if (!approvedBy) approvedBy = hi.approvedBy || 'Hostel Incharge';
+      }
+    }
+    
     const rowData = [
       { width: columnSpacing.srNo, text: (index + 1).toString() },
       { width: columnSpacing.name, text: request.studentId?.name || 'N/A' },
@@ -119,7 +158,10 @@ const generatePDF = (res, { title, requests, role, statistics, dateRange }) => {
       { width: columnSpacing.branch, text: request.studentId?.branch || 'N/A' },
       { width: columnSpacing.outTime, text: request.outingTime || 'N/A' },
       { width: columnSpacing.inTime, text: request.returnTime || 'N/A' },
-      { width: columnSpacing.purpose, text: request.purpose || 'N/A' }
+      { width: columnSpacing.purpose, text: request.purpose || 'N/A' },
+      { width: columnSpacing.fiRemark, text: fiRemarks || '—' },
+      { width: columnSpacing.hiRemark, text: hiRemarks || '—' },
+      { width: columnSpacing.approvedBy, text: approvedBy }
     ];
 
     rowData.forEach(cell => {

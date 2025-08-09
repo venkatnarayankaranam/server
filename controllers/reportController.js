@@ -108,6 +108,31 @@ exports.generateReport = async (req, res) => {
       deniedCount: 0
     };
 
+    // Generate enhanced statistics for the report
+    const enhancedStats = {
+      totalRequests: requests.length,
+      approvedCount: stats.approvedCount,
+      pendingCount: stats.pendingCount,
+      deniedCount: stats.deniedCount,
+      byBlock: {
+        'D-Block': requests.filter(r => r.hostelBlock === 'D-Block').length,
+        'E-Block': requests.filter(r => r.hostelBlock === 'E-Block').length,
+        'Womens-Block': requests.filter(r => r.hostelBlock === 'Womens-Block').length
+      },
+      byDateRange: {
+        thisWeek: requests.filter(r => {
+          const reqDate = new Date(r.createdAt);
+          const weekAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+          return reqDate >= weekAgo;
+        }).length,
+        thisMonth: requests.filter(r => {
+          const reqDate = new Date(r.createdAt);
+          const monthAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+          return reqDate >= monthAgo;
+        }).length
+      }
+    };
+
     // Generate PDF using the service
     const reportTitle = `${reportType.charAt(0).toUpperCase() + reportType.slice(1)} Outing Report`;
     
@@ -119,7 +144,7 @@ exports.generateReport = async (req, res) => {
       title: reportTitle,
       requests,
       role,
-      statistics: stats,
+      statistics: enhancedStats,
       dateRange: {
         start: startDate,
         end: endDate
