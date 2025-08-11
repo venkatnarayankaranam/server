@@ -1,8 +1,8 @@
 const PDFDocument = require('pdfkit');
 
-const generatePDF = (res, { title, requests, role, statistics, dateRange }) => {
+const generatePDF = (res, { title, requests, role, statistics, dateRange, isCustomReport = false, isStudentSpecific = false, reportType = 'outing' }) => {
   const doc = new PDFDocument({
-    margin: 50,
+    margin: 30,
     size: 'A4',
     layout: 'landscape'
   });
@@ -10,170 +10,363 @@ const generatePDF = (res, { title, requests, role, statistics, dateRange }) => {
   // Pipe the PDF to the response
   doc.pipe(res);
 
-  // Add header
-  doc.fontSize(16).font('Helvetica-Bold').text(title, { align: 'center' });
-  doc.moveDown();
-  doc.fontSize(10).font('Helvetica').text(`Generated on: ${new Date().toLocaleString()}`, { align: 'right' });
+  // Add header with better styling
+  doc.fontSize(18).font('Helvetica-Bold').text(title, { align: 'center' });
+  doc.moveDown(0.5);
+  
+  // Add generation info
+  doc.fontSize(10).font('Helvetica')
+     .text(`Generated on: ${new Date().toLocaleString()}`, { align: 'right' });
   
   // Add date range if provided
   if (dateRange) {
     doc.text(`Report Period: ${dateRange.start.toLocaleDateString()} to ${dateRange.end.toLocaleDateString()}`, { align: 'right' });
   }
   
-  doc.moveDown();
+  doc.moveDown(0.5);
 
   // Add statistics section if provided
   if (statistics) {
-    doc.fontSize(12).font('Helvetica-Bold').text('Summary Statistics:', 50, doc.y);
+    doc.fontSize(14).font('Helvetica-Bold').text('Summary Statistics:', 30, doc.y);
     doc.moveDown(0.5);
     
     const statsY = doc.y;
-    const statsHeight = 80;
+    const statsHeight = 100;
+    const statsWidth = 750;
     
-    // Draw statistics box
-    doc.rect(50, statsY, 500, statsHeight).stroke();
+    // Draw statistics box with better styling
+    doc.fillColor('#f8f9fa')
+       .rect(30, statsY, statsWidth, statsHeight)
+       .fill();
     
-    doc.fontSize(10).font('Helvetica');
+    doc.strokeColor('#dee2e6')
+       .lineWidth(1)
+       .rect(30, statsY, statsWidth, statsHeight)
+       .stroke();
+    
+    doc.fillColor('#000000');
+    doc.fontSize(11).font('Helvetica');
     
     // Handle different statistics structures
-    let statsText = [];
-    if (statistics.totalRequests !== undefined) {
-      // New statistics format
-      statsText = [
-        `Total Approved Requests: ${statistics.totalRequests || 0}`,
+    let statsLines = [];
+    
+    if (statistics.studentSpecific) {
+      // Student-specific report
+      statsLines = [
+        `Student: ${statistics.studentSpecific.studentName} (${statistics.studentSpecific.rollNumber}) - ${statistics.studentSpecific.hostelBlock || 'N/A'}`,
+        `Total ${reportType === 'home' ? 'Home Permissions' : 'Outings'}: ${statistics.studentSpecific.totalOutings} | Emergency: ${statistics.studentSpecific.emergency || 0}`,
+        `Approved: ${statistics.studentSpecific.approved} | Pending: ${statistics.studentSpecific.pending} | Denied: ${statistics.studentSpecific.denied}`,
+        `Disciplinary Actions: ${statistics.studentSpecific.disciplinaryActions || 0} | Suspicious Activities: ${statistics.studentSpecific.suspiciousActivities || 0}`,
+        `Report Period: ${statistics.dateRange?.start || 'N/A'} to ${statistics.dateRange?.end || 'N/A'}`
+      ];
+    } else if (statistics.totalRequests !== undefined) {
+      // General statistics
+      statsLines = [
+        `Total Requests: ${statistics.totalRequests || 0} | Approved: ${statistics.approvedCount || 0} | Pending: ${statistics.pendingCount || 0} | Denied: ${statistics.deniedCount || 0}`,
         `Block Distribution - D-Block: ${statistics.byBlock?.['D-Block'] || 0} | E-Block: ${statistics.byBlock?.['E-Block'] || 0} | Womens-Block: ${statistics.byBlock?.['Womens-Block'] || 0}`,
-        `Time Period - This Week: ${statistics.byDateRange?.thisWeek || 0} | This Month: ${statistics.byDateRange?.thisMonth || 0}`,
-        `Report Generated: ${new Date().toLocaleString()}`
+        `Report Period: ${statistics.dateRange?.start || 'N/A'} to ${statistics.dateRange?.end || 'N/A'}`,
+        `Generated: ${new Date().toLocaleString()}`
       ];
     } else {
-      // Legacy statistics format
-      statsText = [
+      // Legacy format
+      statsLines = [
         `Total Outings: ${statistics.totalOutings || 0}`,
         `Approved: ${statistics.approvedCount || 0} | Pending: ${statistics.pendingCount || 0} | Denied: ${statistics.deniedCount || 0}`,
         `Total Returns: ${statistics.totalReturns || 0}`,
-        `Report Generated: ${new Date().toLocaleString()}`
+        `Generated: ${new Date().toLocaleString()}`
       ];
     }
     
-    statsText.forEach((text, index) => {
-      const x = 60 + (index % 2) * 250;
-      const y = statsY + 15 + Math.floor(index / 2) * 20;
-      doc.text(text, x, y);
+    statsLines.forEach((text, index) => {
+      const y = statsY + 15 + (index * 18);
+      doc.text(text, 45, y, { width: statsWidth - 30 });
     });
     
-    doc.y = statsY + statsHeight + 20;
+    doc.y = statsY + statsHeight + 15;
     doc.moveDown();
   }
 
-  // Define table layout - add columns for approval remarks (FI/HI)
-  const tableTop = doc.y + 20;
-  const columnSpacing = {
-    srNo: 30,
-    name: 80,
-    rollNo: 70,
-    blockRoom: 70,
-    contact: 70,
-    branch: 50,
-    outTime: 60,
-    inTime: 60,
-    purpose: 80,
-    fiRemark: 120,
-    hiRemark: 120,
-    approvedBy: 70
-  };
-
-  let currentY = tableTop;
-
-  // Draw table headers
-  doc.font('Helvetica-Bold');
-  let currentX = 50;
-
-  const headers = [
-    { width: columnSpacing.srNo, text: 'Sr.No' },
-    { width: columnSpacing.name, text: 'Name' },
-    { width: columnSpacing.rollNo, text: 'Roll No' },
-    { width: columnSpacing.blockRoom, text: 'Block/Room' },
-    { width: columnSpacing.contact, text: 'Contact' },
-    { width: columnSpacing.branch, text: 'Branch' },
-    { width: columnSpacing.outTime, text: 'Out Time' },
-    { width: columnSpacing.inTime, text: 'In Time' },
-    { width: columnSpacing.purpose, text: 'Purpose' },
-    { width: columnSpacing.fiRemark, text: 'FI Remarks' },
-    { width: columnSpacing.hiRemark, text: 'HI Remarks' },
-    { width: columnSpacing.approvedBy, text: 'Approved By' }
+  // Define improved table layout
+  const tableTop = doc.y + 10;
+  const tableStartX = 30;
+  const rowHeight = 25;
+  const headerHeight = 30;
+  
+  // Optimized column widths for landscape A4 - Enhanced for emergency and suspicious activity tracking
+  const columns = [
+    { x: tableStartX, width: 30, title: 'Sr.No', align: 'center' },
+    { x: tableStartX + 30, width: 85, title: 'Student Name', align: 'left' },
+    { x: tableStartX + 115, width: 65, title: 'Roll Number', align: 'left' },
+    { x: tableStartX + 180, width: 60, title: 'Block/Room', align: 'center' },
+    { x: tableStartX + 240, width: 40, title: 'Branch', align: 'center' },
+    { x: tableStartX + 280, width: 45, title: 'Out Time', align: 'center' },
+    { x: tableStartX + 325, width: 45, title: 'Return Time', align: 'center' },
+    { x: tableStartX + 370, width: 75, title: 'Purpose', align: 'left' },
+    { x: tableStartX + 445, width: 40, title: 'Type', align: 'center' },
+    { x: tableStartX + 485, width: 80, title: 'Floor Incharge', align: 'left' },
+    { x: tableStartX + 565, width: 80, title: 'Hostel Incharge', align: 'left' },
+    { x: tableStartX + 645, width: 50, title: 'Status', align: 'center' },
+    { x: tableStartX + 695, width: 50, title: 'Alerts', align: 'center' }
   ];
 
-  // Draw header background
-  doc.fillColor('#f3f4f6')
-     .rect(currentX - 5, currentY - 5, 
-           headers.reduce((sum, h) => sum + h.width, 0) + 10, 25)
+  const totalTableWidth = columns.reduce((sum, col) => sum + col.width, 0);
+  let currentY = tableTop;
+
+  // Draw table header with improved styling
+  doc.fillColor('#4f46e5')
+     .rect(tableStartX, currentY, totalTableWidth, headerHeight)
      .fill();
+  
+  doc.strokeColor('#374151')
+     .lineWidth(1)
+     .rect(tableStartX, currentY, totalTableWidth, headerHeight)
+     .stroke();
 
   // Draw header text
-  doc.fillColor('#000000');
-  headers.forEach(header => {
-    doc.text(header.text, currentX, currentY, {
-      width: header.width,
-      align: 'left'
+  doc.fillColor('#ffffff');
+  doc.fontSize(10).font('Helvetica-Bold');
+  columns.forEach(column => {
+    doc.text(column.title, column.x + 3, currentY + 10, {
+      width: column.width - 6,
+      align: column.align
     });
-    currentX += header.width;
   });
 
-  currentY += 30;
+  // Draw column separators in header
+  columns.forEach((column, index) => {
+    if (index < columns.length - 1) {
+      doc.strokeColor('#6366f1')
+         .lineWidth(0.5)
+         .moveTo(column.x + column.width, currentY)
+         .lineTo(column.x + column.width, currentY + headerHeight)
+         .stroke();
+    }
+  });
 
-  // Draw table data
-  doc.font('Helvetica');
+  currentY += headerHeight;
+
+  // Draw table data with improved formatting
+  doc.fontSize(9).font('Helvetica');
   requests.forEach((request, index) => {
-    if (currentY > 500) {
+    // Check if we need a new page
+    if (currentY > 520) {
+      doc.addPage();
+      currentY = 50;
+      
+      // Redraw header on new page
+      doc.fillColor('#4f46e5')
+         .rect(tableStartX, currentY, totalTableWidth, headerHeight)
+         .fill();
+      
+      doc.strokeColor('#374151')
+         .lineWidth(1)
+         .rect(tableStartX, currentY, totalTableWidth, headerHeight)
+         .stroke();
+
+      doc.fillColor('#ffffff');
+      doc.fontSize(10).font('Helvetica-Bold');
+      columns.forEach(column => {
+        doc.text(column.title, column.x + 3, currentY + 10, {
+          width: column.width - 6,
+          align: column.align
+        });
+      });
+
+      columns.forEach((column, colIndex) => {
+        if (colIndex < columns.length - 1) {
+          doc.strokeColor('#6366f1')
+             .lineWidth(0.5)
+             .moveTo(column.x + column.width, currentY)
+             .lineTo(column.x + column.width, currentY + headerHeight)
+             .stroke();
+        }
+      });
+
+      currentY += headerHeight;
+      doc.fontSize(9).font('Helvetica');
+    }
+
+    // Draw row background (alternate colors)
+    doc.fillColor(index % 2 === 0 ? '#ffffff' : '#f8f9fa')
+       .rect(tableStartX, currentY, totalTableWidth, rowHeight)
+       .fill();
+
+    // Draw row border
+    doc.strokeColor('#e5e7eb')
+       .lineWidth(0.5)
+       .rect(tableStartX, currentY, totalTableWidth, rowHeight)
+       .stroke();
+
+    // Extract approval information and remarks
+    let fiRemarks = '—';
+    let hiRemarks = '—';
+    let status = request.status || 'pending';
+    
+    if (request.approvalFlags) {
+      if (request.approvalFlags.floorIncharge?.remarks) {
+        fiRemarks = request.approvalFlags.floorIncharge.remarks.substring(0, 25) + (request.approvalFlags.floorIncharge.remarks.length > 25 ? '...' : '');
+      }
+      if (request.approvalFlags.hostelIncharge?.remarks) {
+        hiRemarks = request.approvalFlags.hostelIncharge.remarks.substring(0, 25) + (request.approvalFlags.hostelIncharge.remarks.length > 25 ? '...' : '');
+      }
+    }
+
+    // Determine request type and alerts
+    const isEmergency = request.isEmergency || request.category === 'emergency';
+    const requestType = reportType === 'home' ? 'HOME' : (isEmergency ? '🚨EMRG' : 'REG');
+    
+    // Check for suspicious activities or disciplinary actions for this student
+    let alertCount = 0;
+    if (statistics.disciplinaryActions) {
+      alertCount += statistics.disciplinaryActions.filter(d => 
+        d.studentId && d.studentId.toString() === request.studentId._id.toString()
+      ).length;
+    }
+    if (statistics.suspiciousActivities) {
+      alertCount += statistics.suspiciousActivities.filter(s => 
+        s.userId && s.userId.toString() === request.studentId._id.toString()
+      ).length;
+    }
+    
+    const alertText = alertCount > 0 ? `⚠️${alertCount}` : '—';
+
+    // Prepare row data
+    const rowData = [
+      { text: (index + 1).toString(), align: 'center' },
+      { text: (request.studentId?.name || 'N/A').substring(0, 18), align: 'left' },
+      { text: request.studentId?.rollNumber || 'N/A', align: 'left' },
+      { text: `${request.studentId?.hostelBlock || 'N/A'}/${request.studentId?.roomNumber || 'N/A'}`, align: 'center' },
+      { text: request.studentId?.branch || 'N/A', align: 'center' },
+      { text: request.outingTime || 'N/A', align: 'center' },
+      { text: request.returnTime || 'N/A', align: 'center' },
+      { text: (request.purpose || 'N/A').substring(0, 12) + (request.purpose && request.purpose.length > 12 ? '...' : ''), align: 'left' },
+      { text: requestType, align: 'center' },
+      { text: fiRemarks.substring(0, 12) + (fiRemarks.length > 12 ? '...' : ''), align: 'left' },
+      { text: hiRemarks.substring(0, 12) + (hiRemarks.length > 12 ? '...' : ''), align: 'left' },
+      { text: status.toUpperCase(), align: 'center' },
+      { text: alertText, align: 'center' }
+    ];
+
+    // Draw row data
+    doc.fillColor('#000000');
+    columns.forEach((column, colIndex) => {
+      doc.text(rowData[colIndex].text, column.x + 3, currentY + 8, {
+        width: column.width - 6,
+        align: column.align
+      });
+    });
+
+    // Draw column separators for data rows
+    columns.forEach((column, colIndex) => {
+      if (colIndex < columns.length - 1) {
+        doc.strokeColor('#e5e7eb')
+           .lineWidth(0.5)
+           .moveTo(column.x + column.width, currentY)
+           .lineTo(column.x + column.width, currentY + rowHeight)
+           .stroke();
+      }
+    });
+
+    currentY += rowHeight;
+  });
+
+  // Add disciplinary actions and suspicious activities section for student-specific reports
+  if (isStudentSpecific && (statistics.disciplinaryActions?.length > 0 || statistics.suspiciousActivities?.length > 0)) {
+    currentY += 30; // Add some space
+    
+    // Check if we need a new page
+    if (currentY > 450) {
       doc.addPage();
       currentY = 50;
     }
 
-    currentX = 50;
-    
-    // Extract approval information and remarks
-    let approvedBy = 'N/A';
-    let fiRemarks = '';
-    let hiRemarks = '';
-    if (request.approvalFlow && request.approvalFlow.length > 0) {
-      const fi = request.approvalFlow.find(flow => flow.level === 'floor-incharge' && flow.status === 'approved');
-      const hi = request.approvalFlow.find(flow => flow.level === 'hostel-incharge' && flow.status === 'approved');
-      if (fi) {
-        fiRemarks = fi.remarks || '';
-        approvedBy = fi.approvedBy || 'Floor Incharge';
-      }
-      if (hi) {
-        hiRemarks = hi.remarks || '';
-        // Prefer HI as approvedBy if warden/final not present and FI missing approver
-        if (!approvedBy) approvedBy = hi.approvedBy || 'Hostel Incharge';
-      }
-    }
-    
-    const rowData = [
-      { width: columnSpacing.srNo, text: (index + 1).toString() },
-      { width: columnSpacing.name, text: request.studentId?.name || 'N/A' },
-      { width: columnSpacing.rollNo, text: request.studentId?.rollNumber || 'N/A' },
-      { width: columnSpacing.blockRoom, text: `${request.studentId?.hostelBlock || 'N/A'}/${request.studentId?.roomNumber || 'N/A'}` },
-      { width: columnSpacing.contact, text: request.studentId?.phoneNumber || 'N/A' },
-      { width: columnSpacing.branch, text: request.studentId?.branch || 'N/A' },
-      { width: columnSpacing.outTime, text: request.outingTime || 'N/A' },
-      { width: columnSpacing.inTime, text: request.returnTime || 'N/A' },
-      { width: columnSpacing.purpose, text: request.purpose || 'N/A' },
-      { width: columnSpacing.fiRemark, text: fiRemarks || '—' },
-      { width: columnSpacing.hiRemark, text: hiRemarks || '—' },
-      { width: columnSpacing.approvedBy, text: approvedBy }
-    ];
+    // Disciplinary Actions Section
+    if (statistics.disciplinaryActions?.length > 0) {
+      doc.fontSize(14).font('Helvetica-Bold')
+         .fillColor('#dc2626')
+         .text('Disciplinary Actions During Report Period', tableStartX, currentY);
+      currentY += 25;
 
-    rowData.forEach(cell => {
-      doc.text(cell.text, currentX, currentY, {
-        width: cell.width,
-        align: 'left'
+      statistics.disciplinaryActions.forEach((action, index) => {
+        if (currentY > 520) {
+          doc.addPage();
+          currentY = 50;
+        }
+
+        doc.fontSize(10).font('Helvetica-Bold')
+           .fillColor('#000000')
+           .text(`${index + 1}. ${action.title}`, tableStartX, currentY);
+        currentY += 15;
+
+        doc.fontSize(9).font('Helvetica')
+           .text(`Description: ${action.description}`, tableStartX + 20, currentY);
+        currentY += 12;
+
+        doc.text(`Severity: ${action.severity?.toUpperCase()} | Category: ${action.category} | Date: ${new Date(action.createdAt).toLocaleDateString()}`, 
+                 tableStartX + 20, currentY);
+        currentY += 20;
       });
-      currentX += cell.width;
-    });
 
-    currentY += 20;
-  });
+      currentY += 10;
+    }
+
+    // Suspicious Activities Section
+    if (statistics.suspiciousActivities?.length > 0) {
+      if (currentY > 450) {
+        doc.addPage();
+        currentY = 50;
+      }
+
+      doc.fontSize(14).font('Helvetica-Bold')
+         .fillColor('#7c2d12')
+         .text('Suspicious Activities During Report Period', tableStartX, currentY);
+      currentY += 25;
+
+      statistics.suspiciousActivities.forEach((activity, index) => {
+        if (currentY > 520) {
+          doc.addPage();
+          currentY = 50;
+        }
+
+        doc.fontSize(10).font('Helvetica-Bold')
+           .fillColor('#000000')
+           .text(`${index + 1}. ${activity.title}`, tableStartX, currentY);
+        currentY += 15;
+
+        doc.fontSize(9).font('Helvetica')
+           .text(`Alert: ${activity.message}`, tableStartX + 20, currentY);
+        currentY += 12;
+
+        doc.text(`Date: ${new Date(activity.createdAt).toLocaleDateString()}`, 
+                 tableStartX + 20, currentY);
+        currentY += 20;
+      });
+    }
+  }
+
+  // Add footer with page numbers (only if there are requests)
+  if (requests && requests.length > 0) {
+    try {
+      const pageRange = doc.bufferedPageRange();
+      const pageCount = pageRange.count;
+      
+      if (pageCount > 0) {
+        for (let i = 0; i < pageCount; i++) {
+          doc.switchToPage(i);
+          doc.fontSize(8)
+             .fillColor('#666666')
+             .text(`Page ${i + 1} of ${pageCount}`, 30, 580, { align: 'center', width: 750 });
+        }
+      }
+    } catch (pageError) {
+      console.warn('Could not add page numbers:', pageError.message);
+    }
+  } else {
+    // Add "No data found" message if no requests
+    doc.fontSize(12)
+       .fillColor('#666666')
+       .text('No outing requests found for the selected criteria.', 30, currentY + 50, { align: 'center', width: 750 });
+  }
 
   doc.end();
 };

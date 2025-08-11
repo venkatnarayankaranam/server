@@ -4,6 +4,7 @@ const { auth, checkRole } = require('../middleware/auth');
 const Student = require('../models/Student');
 const DisciplinaryAction = require('../models/DisciplinaryAction');
 const Notification = require('../models/Notification');
+const { generatePDF } = require('../services/pdfService');
 
 // GET /students/blocks - list students grouped by hostel blocks for hostel incharge
 router.get('/blocks', auth, checkRole(['hostel-incharge', 'warden', 'admin']), async (req, res) => {
@@ -436,6 +437,310 @@ router.delete('/:id', auth, checkRole(['hostel-incharge', 'warden', 'admin']), a
   } catch (error) {
     console.error('students delete error:', error);
     res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+// Test route to verify students routes are working
+router.get('/test-pdf', auth, checkRole(['student']), async (req, res) => {
+  res.json({ success: true, message: 'PDF route is accessible' });
+});
+
+// GET /students/past-outings/pdf - generate PDF report for student's past outings
+router.get('/past-outings/pdf', auth, checkRole(['student']), async (req, res) => {
+  try {
+    console.log('📄 PDF route accessed by student:', req.user);
+    const { startDate, endDate } = req.query;
+    const studentId = req.user._id; // For students, req.user is the student object directly
+
+    if (!studentId) {
+      return res.status(400).json({
+        success: false,
+        message: 'Student ID not found in user profile'
+      });
+    }
+
+    // Set default date range if not provided (last 30 days)
+    const end = endDate ? new Date(endDate) : new Date();
+    const start = startDate ? new Date(startDate) : new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+    end.setHours(23, 59, 59, 999);
+
+    // Get student details
+    const student = await Student.findById(studentId)
+      .select('name rollNumber hostelBlock floor roomNumber branch semester')
+      .lean();
+
+    if (!student) {
+      return res.status(404).json({
+        success: false,
+        message: 'Student not found'
+      });
+    }
+
+    // Get outing requests in date range
+    const OutingRequest = require('../models/OutingRequest');
+    const outingRequests = await OutingRequest.find({
+      studentId: studentId,
+      createdAt: {
+        $gte: start,
+        $lte: end
+      }
+    })
+    .populate('studentId', 'name rollNumber hostelBlock floor roomNumber branch')
+    .sort({ createdAt: -1 })
+    .lean();
+
+    // Generate statistics
+    const statistics = {
+      totalRequests: outingRequests.length,
+      approvedCount: outingRequests.filter(r => r.status === 'approved').length,
+      pendingCount: outingRequests.filter(r => r.status === 'pending').length,
+      deniedCount: outingRequests.filter(r => r.status === 'denied').length,
+      studentSpecific: {
+        studentName: student.name,
+        rollNumber: student.rollNumber,
+        totalOutings: outingRequests.length,
+        approved: outingRequests.filter(r => r.status === 'approved').length,
+        pending: outingRequests.filter(r => r.status === 'pending').length,
+        denied: outingRequests.filter(r => r.status === 'denied').length
+      },
+      dateRange: {
+        start: start.toLocaleDateString(),
+        end: end.toLocaleDateString()
+      }
+    };
+
+    // Set response headers
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename=my-outing-history-${student.rollNumber}.pdf`);
+
+    // Generate PDF
+    generatePDF(res, {
+      title: `Outing History - ${student.name} (${student.rollNumber})`,
+      requests: outingRequests,
+      role: 'student',
+      statistics,
+      dateRange: {
+        start,
+        end
+      },
+      isCustomReport: true
+    });
+
+  } catch (error) {
+    console.error('Student PDF generation error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to generate PDF report',
+      error: error.message
+    });
+  }
+});
+
+// GET /students/past-home-permissions/pdf - generate PDF report for student's past home permissions
+router.get('/past-home-permissions/pdf', auth, checkRole(['student']), async (req, res) => {
+  try {
+    const { startDate, endDate } = req.query;
+    const studentId = req.user._id; // For students, req.user is the student object directly
+
+    if (!studentId) {
+      return res.status(400).json({
+        success: false,
+        message: 'Student ID not found in user profile'
+      });
+    }
+
+    // Set default date range if not provided (last 30 days)
+    const end = endDate ? new Date(endDate) : new Date();
+    const start = startDate ? new Date(startDate) : new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+    end.setHours(23, 59, 59, 999);
+
+    // Get student details
+    const student = await Student.findById(studentId)
+      .select('name rollNumber hostelBlock floor roomNumber branch semester')
+      .lean();
+
+    if (!student) {
+      return res.status(404).json({
+        success: false,
+        message: 'Student not found'
+      });
+    }
+
+    // Get home permission requests in date range
+    const HomePermissionRequest = require('../models/HomePermissionRequest');
+    const homeRequests = await HomePermissionRequest.find({
+      studentId: studentId,
+      createdAt: {
+        $gte: start,
+        $lte: end
+      }
+    })
+    .populate('studentId', 'name rollNumber hostelBlock floor roomNumber branch')
+    .sort({ createdAt: -1 })
+    .lean();
+
+    // Generate statistics
+    const statistics = {
+      totalRequests: homeRequests.length,
+      approvedCount: homeRequests.filter(r => r.status === 'approved').length,
+      pendingCount: homeRequests.filter(r => r.status === 'pending').length,
+      deniedCount: homeRequests.filter(r => r.status === 'denied').length,
+      studentSpecific: {
+        studentName: student.name,
+        rollNumber: student.rollNumber,
+        totalOutings: homeRequests.length,
+        approved: homeRequests.filter(r => r.status === 'approved').length,
+        pending: homeRequests.filter(r => r.status === 'pending').length,
+        denied: homeRequests.filter(r => r.status === 'denied').length
+      },
+      dateRange: {
+        start: start.toLocaleDateString(),
+        end: end.toLocaleDateString()
+      }
+    };
+
+    // Set response headers
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename=my-home-permissions-${student.rollNumber}.pdf`);
+
+    // Generate PDF
+    generatePDF(res, {
+      title: `Home Permission History - ${student.name} (${student.rollNumber})`,
+      requests: homeRequests,
+      role: 'student',
+      statistics,
+      dateRange: {
+        start,
+        end
+      },
+      isCustomReport: true,
+      reportType: 'home'
+    });
+
+  } catch (error) {
+    console.error('Student home permission PDF generation error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to generate PDF report',
+      error: error.message
+    });
+  }
+});
+
+// GET /students/:id/details - Get comprehensive student details for hostel incharge
+router.get('/:id/details', auth, checkRole(['hostel-incharge', 'warden', 'admin']), async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { assignedBlocks } = req.user;
+
+    // Get student details
+    const student = await Student.findById(id)
+      .select('name email rollNumber hostelBlock floor roomNumber phoneNumber parentPhoneNumber branch semester')
+      .lean();
+
+    if (!student) {
+      return res.status(404).json({
+        success: false,
+        message: 'Student not found'
+      });
+    }
+
+    // Check access permissions
+    if (assignedBlocks && assignedBlocks.length > 0 && !assignedBlocks.includes(student.hostelBlock)) {
+      return res.status(403).json({
+        success: false,
+        message: 'Access denied: Student not in your assigned blocks'
+      });
+    }
+
+    // Get disciplinary actions
+    const disciplinaryActions = await DisciplinaryAction.find({
+      studentId: id
+    })
+    .select('title description severity category createdAt')
+    .sort({ createdAt: -1 })
+    .limit(20)
+    .lean();
+
+    // Get suspicious activities (notifications)
+    const suspiciousActivities = await Notification.find({
+      userId: id,
+      type: 'securityAlert'
+    })
+    .select('title message createdAt')
+    .sort({ createdAt: -1 })
+    .limit(20)
+    .lean();
+
+    // Get recent outing requests
+    const OutingRequest = require('../models/OutingRequest');
+    const recentOutings = await OutingRequest.find({
+      studentId: id
+    })
+    .select('purpose outingDate outingTime returnTime status isEmergency createdAt')
+    .sort({ createdAt: -1 })
+    .limit(10)
+    .lean();
+
+    // Get recent home permission requests
+    const HomePermissionRequest = require('../models/HomePermissionRequest');
+    const recentHomePermissions = await HomePermissionRequest.find({
+      studentId: id
+    })
+    .select('purpose startDate endDate status category createdAt')
+    .sort({ createdAt: -1 })
+    .limit(10)
+    .lean();
+
+    // Get gate activities if the model exists
+    let gateActivities = [];
+    try {
+      const GateActivity = require('../models/GateActivity');
+      gateActivities = await GateActivity.find({
+        studentId: id
+      })
+      .select('type scannedAt location isSuspicious suspiciousComment isEmergency')
+      .sort({ scannedAt: -1 })
+      .limit(20)
+      .lean();
+    } catch (error) {
+      console.log('GateActivity model not available, skipping gate activities');
+    }
+
+    // Compile comprehensive student data
+    const comprehensiveData = {
+      ...student,
+      disciplinaryActions,
+      suspiciousActivities,
+      recentOutings,
+      recentHomePermissions,
+      gateActivities,
+      statistics: {
+        totalOutings: recentOutings.length,
+        approvedOutings: recentOutings.filter(o => o.status === 'approved').length,
+        pendingOutings: recentOutings.filter(o => o.status === 'pending').length,
+        deniedOutings: recentOutings.filter(o => o.status === 'denied').length,
+        emergencyOutings: recentOutings.filter(o => o.isEmergency).length,
+        totalHomePermissions: recentHomePermissions.length,
+        approvedHomePermissions: recentHomePermissions.filter(h => h.status === 'approved').length,
+        disciplinaryActionsCount: disciplinaryActions.length,
+        suspiciousActivitiesCount: suspiciousActivities.length,
+        gateActivitiesCount: gateActivities.length
+      }
+    };
+
+    res.json({
+      success: true,
+      student: comprehensiveData
+    });
+
+  } catch (error) {
+    console.error('Student details fetch error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to fetch student details',
+      error: error.message
+    });
   }
 });
 

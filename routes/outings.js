@@ -691,6 +691,49 @@ router.post('/verify-qr', auth, checkRole(['security']), async (req, res) => {
   }
 });
 
+// Get outing request details
+router.get('/:id/details', auth, checkRole(['hostel-incharge', 'floor-incharge', 'warden', 'admin']), async (req, res) => {
+  try {
+    const request = await OutingRequest.findById(req.params.id)
+      .populate('studentId', 'name email rollNumber hostelBlock floor roomNumber phoneNumber parentPhoneNumber branch semester')
+      .lean();
+
+    if (!request) {
+      return res.status(404).json({
+        success: false,
+        message: 'Outing request not found'
+      });
+    }
+
+    // Check if user has access to this request
+    const assignedBlocks = Array.isArray(req.user.assignedBlocks) && req.user.assignedBlocks.length > 0
+      ? req.user.assignedBlocks
+      : (req.user.hostelBlock ? [req.user.hostelBlock] : []);
+
+    if (!assignedBlocks.includes(request.hostelBlock) && req.user.role !== 'admin') {
+      return res.status(403).json({
+        success: false,
+        message: 'Access denied: Request not in your assigned blocks'
+      });
+    }
+
+    res.json({
+      success: true,
+      data: {
+        ...request,
+        studentId: request.studentId._id
+      }
+    });
+  } catch (error) {
+    console.error('Get outing request details error:', error);
+    res.status(500).json({ 
+      success: false, 
+      message: 'Failed to fetch outing request details',
+      error: error.message 
+    });
+  }
+});
+
 // Get QR Code for student
 router.get('/request/:id/qr-code', auth, async (req, res) => {
   try {
