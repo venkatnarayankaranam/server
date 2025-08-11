@@ -121,6 +121,7 @@ const reportRoutes = require('./routes/reports');
 const homePermissionRoutes = require('./routes/homePermissions');
 const disciplinaryRoutes = require('./routes/disciplinary');
 const studentsRoutes = require('./routes/students');
+const notificationRoutes = require('./routes/notifications');
 
 // Register routes
 app.use('/auth', require('./routes/auth'));
@@ -131,6 +132,7 @@ app.use('/users', userRoutes);
 app.use('/gate', gateRoutes);
 app.use('/disciplinary', disciplinaryRoutes);
 app.use('/students', studentsRoutes);
+app.use('/notifications', notificationRoutes);
 
 app.use('/reports', reportRoutes);
 

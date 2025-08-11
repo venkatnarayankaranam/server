@@ -180,11 +180,18 @@ router.get('/floor-incharge/requests', auth, checkRole(['floor-incharge']), asyn
 
     console.log('📊 Floor Incharge Stats:', stats);
 
+    // Load recent notifications for this floor incharge
+    const notifications = await Notification.find({ userId: req.user.id })
+      .sort({ createdAt: -1 })
+      .limit(20)
+      .lean();
+
     res.json({ 
       success: true, 
       requests, 
       stats,
-      totalStudents 
+      totalStudents,
+      notifications
     });
   } catch (error) {
     console.error('❌ Floor Incharge Dashboard Error:', error);
@@ -201,8 +208,8 @@ router.get('/hostel-incharge/requests', auth, checkRole(['hostel-incharge']), as
     }).populate({
       path: 'studentId',
       model: 'Student',
-      select: 'name rollNumber roomNumber floor hostelBlock'
-    });
+      select: 'name rollNumber roomNumber floor hostelBlock phoneNumber parentPhoneNumber branch semester'
+    }).lean();
 
     // Get statistics
     const Student = require('../models/Student');
@@ -226,10 +233,29 @@ router.get('/hostel-incharge/requests', auth, checkRole(['hostel-incharge']), as
       })
     };
 
+    // Load recent notifications for this hostel incharge
+    const notifications = await Notification.find({ userId: req.user.id })
+      .sort({ createdAt: -1 })
+      .limit(20)
+      .lean();
+
+    // Enhance requests with approval details
+    const enhancedRequests = requests.map(request => ({
+      ...request,
+      approvalDetails: {
+        floorIncharge: request.approvalFlow?.find(flow => flow.level === 'floor-incharge') || null,
+        hostelIncharge: request.approvalFlow?.find(flow => flow.level === 'hostel-incharge') || null,
+        warden: request.approvalFlow?.find(flow => flow.level === 'warden') || null
+      },
+      currentApprovalLevel: request.currentLevel,
+      canApprove: request.currentLevel === 'hostel-incharge'
+    }));
+
     res.json({
       success: true,
-      requests,
-      stats
+      requests: enhancedRequests,
+      stats,
+      notifications
     });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
@@ -278,13 +304,114 @@ router.get('/warden/requests', auth, checkRole(['warden']), async (req, res) => 
       })
     };
 
+    // Load recent notifications for this warden
+    const notifications = await Notification.find({ userId: req.user.id })
+      .sort({ createdAt: -1 })
+      .limit(20)
+      .lean();
+
     res.json({
       success: true,
       requests,
-      stats
+      stats,
+      notifications
     });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+// Get detailed request information for view button
+router.get('/request/:requestId/details', auth, checkRole(['floor-incharge', 'hostel-incharge', 'warden', 'admin']), async (req, res) => {
+  try {
+    const { requestId } = req.params;
+    
+    const request = await OutingRequest.findById(requestId)
+      .populate({
+        path: 'studentId',
+        model: 'Student',
+        select: 'name rollNumber roomNumber floor hostelBlock phoneNumber parentPhoneNumber branch semester email'
+      })
+      .lean();
+
+    if (!request) {
+      return res.status(404).json({
+        success: false,
+        message: 'Request not found'
+      });
+    }
+
+    // Check access permissions
+    const userRole = req.user.role;
+    const userBlocks = req.user.assignedBlocks || (req.user.hostelBlock ? [req.user.hostelBlock] : []);
+    
+    if (userRole !== 'admin' && userRole !== 'warden') {
+      if (!userBlocks.includes(request.hostelBlock)) {
+        return res.status(403).json({
+          success: false,
+          message: 'Access denied: Request not in your assigned blocks'
+        });
+      }
+    }
+
+    // Get detailed approval information
+    const approvalDetails = {
+      floorIncharge: request.approvalFlow?.find(flow => flow.level === 'floor-incharge') || null,
+      hostelIncharge: request.approvalFlow?.find(flow => flow.level === 'hostel-incharge') || null,
+      warden: request.approvalFlow?.find(flow => flow.level === 'warden') || null
+    };
+
+    // Get disciplinary actions for this student
+    const disciplinaryActions = await DisciplinaryAction.find({
+      studentId: request.studentId._id
+    })
+    .select('title description severity category source createdAt')
+    .sort({ createdAt: -1 })
+    .limit(5)
+    .lean();
+
+    // Get suspicious activities for this student
+    const suspiciousActivities = await Notification.find({
+      userId: request.studentId._id,
+      type: 'securityAlert'
+    })
+    .select('title message createdAt')
+    .sort({ createdAt: -1 })
+    .limit(5)
+    .lean();
+
+    // Calculate risk assessment
+    const riskLevel = disciplinaryActions.length + suspiciousActivities.length >= 3 ? 'high' : 
+                     disciplinaryActions.length + suspiciousActivities.length >= 1 ? 'medium' : 'low';
+
+    const detailedRequest = {
+      ...request,
+      approvalDetails,
+      studentRiskProfile: {
+        disciplinaryActions,
+        suspiciousActivities,
+        totalIncidents: disciplinaryActions.length + suspiciousActivities.length,
+        riskLevel
+      },
+      approvalHistory: request.approvalFlow || [],
+      gateActivity: request.gateActivity || [],
+      canApprove: request.currentLevel === userRole.replace('-', '') || 
+                  (userRole === 'hostel-incharge' && request.currentLevel === 'hostel-incharge') ||
+                  (userRole === 'floor-incharge' && request.currentLevel === 'floor-incharge')
+    };
+
+    res.json({
+      success: true,
+      request: detailedRequest
+    });
+
+  } catch (error) {
+    console.error('Request details error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to fetch request details',
+      error: error.message
+    });
   }
 });
 
@@ -315,6 +442,36 @@ router.post('/request/:requestId/action', auth, async (req, res) => {
     }
 
     await request.save();
+
+    // Create notification for student
+    try {
+      const notification = new Notification({
+        userId: request.studentId,
+        title: action === 'approve' ? 'Outing Request Updated' : 'Outing Request Denied',
+        message: action === 'approve' 
+          ? `Your outing request has been approved by ${req.user.role.replace('-', ' ')} and moved to the next level.`
+          : `Your outing request has been denied by ${req.user.role.replace('-', ' ')}.`,
+        type: 'outingUpdate',
+        referenceId: request._id,
+        read: false
+      });
+      await notification.save();
+
+      // Emit real-time notification if socket is available
+      const socketIO = require('../config/socket');
+      if (socketIO.getIO()) {
+        socketIO.getIO().to(request.studentId.toString()).emit('notification', {
+          id: notification._id,
+          title: notification.title,
+          message: notification.message,
+          type: 'outingUpdate',
+          createdAt: notification.createdAt
+        });
+      }
+    } catch (notifError) {
+      console.error('Failed to create notification:', notifError);
+      // Don't fail the approval process if notification fails
+    }
 
     res.json({
       success: true,

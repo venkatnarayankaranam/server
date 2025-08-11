@@ -391,6 +391,47 @@ router.post('/:requestId/approve', auth, async (req, res) => {
       }
     }
 
+    // Create notification for student
+    try {
+      const Notification = require('../models/Notification');
+      let title, message;
+      
+      if (request.status === 'approved' && request.currentLevel === 'completed') {
+        // Final approval
+        title = 'Home Permission Approved';
+        message = 'Your home permission request has been approved. QR codes have been generated successfully.';
+      } else {
+        // Intermediate approval
+        title = 'Home Permission Updated';
+        message = `Your home permission request has been approved by ${currentUser.role.replace('-', ' ')} and moved to the next level.`;
+      }
+
+      const notification = new Notification({
+        userId: request.studentId._id,
+        title,
+        message,
+        type: 'outingUpdate',
+        referenceId: request._id,
+        read: false
+      });
+      await notification.save();
+
+      // Emit real-time notification if socket is available
+      const socketIO = require('../config/socket');
+      if (socketIO.getIO()) {
+        socketIO.getIO().to(request.studentId._id.toString()).emit('notification', {
+          id: notification._id,
+          title,
+          message,
+          type: 'outingUpdate',
+          createdAt: notification.createdAt
+        });
+      }
+    } catch (notifError) {
+      console.error('Failed to create notification:', notifError);
+      // Don't fail the approval process if notification fails
+    }
+
     // Emit socket event for real-time updates
     const io = getIO();
     if (io) {

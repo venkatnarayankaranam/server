@@ -923,6 +923,35 @@ router.patch('/warden/approve/:requestId', auth, checkRole(['warden']), async (r
     // Save once after all changes
     await request.save();
 
+    // Create notification for student
+    try {
+      const Notification = require('../models/Notification');
+      const notification = new Notification({
+        userId: request.studentId._id,
+        title: 'Outing Request Approved',
+        message: 'Your outing request has been approved by the Warden. QR code has been generated successfully.',
+        type: 'outingUpdate',
+        referenceId: request._id,
+        read: false
+      });
+      await notification.save();
+
+      // Emit real-time notification if socket is available
+      const socketIO = require('../config/socket');
+      if (socketIO.getIO()) {
+        socketIO.getIO().to(request.studentId._id.toString()).emit('notification', {
+          id: notification._id,
+          title: notification.title,
+          message: notification.message,
+          type: 'outingUpdate',
+          createdAt: notification.createdAt
+        });
+      }
+    } catch (notifError) {
+      console.error('Failed to create notification:', notifError);
+      // Don't fail the approval process if notification fails
+    }
+
     // Emit socket event if needed
     const io = req.app.get('io');
     if (io) {
@@ -1441,6 +1470,35 @@ router.patch('/floor-incharge/request/:id/approve', auth, async (req, res) => {
     outing.updateApprovalStatus();
     await outing.save();
 
+    // Create notification for student
+    try {
+      const Notification = require('../models/Notification');
+      const notification = new Notification({
+        userId: outing.studentId,
+        title: 'Outing Request Updated',
+        message: 'Your outing request has been approved by the Hostel Incharge and forwarded to the Warden.',
+        type: 'outingUpdate',
+        referenceId: outing._id,
+        read: false
+      });
+      await notification.save();
+
+      // Emit real-time notification if socket is available
+      const socketIO = require('../config/socket');
+      if (socketIO.getIO()) {
+        socketIO.getIO().to(outing.studentId.toString()).emit('notification', {
+          id: notification._id,
+          title: notification.title,
+          message: notification.message,
+          type: 'outingUpdate',
+          createdAt: notification.createdAt
+        });
+      }
+    } catch (notifError) {
+      console.error('Failed to create notification:', notifError);
+      // Don't fail the approval process if notification fails
+    }
+
     // Emit socket events
     const io = getIO();
     io.of('/floor-incharge').emit('request-updated', { 
@@ -1483,6 +1541,35 @@ router.patch('/hostel-incharge/request/:id/approve', auth, async (req, res) => {
     // Update status
     outing.updateApprovalStatus();
     await outing.save();
+
+    // Create notification for student
+    try {
+      const Notification = require('../models/Notification');
+      const notification = new Notification({
+        userId: outing.studentId,
+        title: 'Outing Request Updated',
+        message: 'Your outing request has been approved by the Hostel Incharge and forwarded to the Warden.',
+        type: 'outingUpdate',
+        referenceId: outing._id,
+        read: false
+      });
+      await notification.save();
+
+      // Emit real-time notification if socket is available
+      const socketIO = require('../config/socket');
+      if (socketIO.getIO()) {
+        socketIO.getIO().to(outing.studentId.toString()).emit('notification', {
+          id: notification._id,
+          title: notification.title,
+          message: notification.message,
+          type: 'outingUpdate',
+          createdAt: notification.createdAt
+        });
+      }
+    } catch (notifError) {
+      console.error('Failed to create notification:', notifError);
+      // Don't fail the approval process if notification fails
+    }
 
     // Emit socket events
     const io = getIO();
@@ -1541,6 +1628,35 @@ router.patch('/warden/request/:id/approve', auth, async (req, res) => {
     }
 
     await outing.save();
+
+    // Create notification for student
+    try {
+      const Notification = require('../models/Notification');
+      const notification = new Notification({
+        userId: outing.studentId,
+        title: 'Outing Request Updated',
+        message: 'Your outing request has been approved by the Hostel Incharge and forwarded to the Warden.',
+        type: 'outingUpdate',
+        referenceId: outing._id,
+        read: false
+      });
+      await notification.save();
+
+      // Emit real-time notification if socket is available
+      const socketIO = require('../config/socket');
+      if (socketIO.getIO()) {
+        socketIO.getIO().to(outing.studentId.toString()).emit('notification', {
+          id: notification._id,
+          title: notification.title,
+          message: notification.message,
+          type: 'outingUpdate',
+          createdAt: notification.createdAt
+        });
+      }
+    } catch (notifError) {
+      console.error('Failed to create notification:', notifError);
+      // Don't fail the approval process if notification fails
+    }
 
     // Emit socket events
     const io = getIO();
