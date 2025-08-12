@@ -1341,6 +1341,28 @@ router.post('/scan', auth, checkRole(['security', 'admin', 'warden', 'gate']), a
       }
       request.gateActivity.push(gateActivity);
       
+      // ✅ IMPORTANT: Also create a separate GateActivity document for PDF reports
+      const GateActivity = require('../models/GateActivity');
+      try {
+        const newGateActivity = new GateActivity({
+          studentId: request.studentId._id,
+          homePermissionRequestId: request._id,
+          type: scanType.toLowerCase(), // 'in' or 'out'
+          scannedAt: new Date(),
+          location: location,
+          qrCode: qrId,
+          securityPersonnel: gateUserId,
+          isEmergency: request.category === 'emergency',
+          createdBy: gateUserId
+        });
+        
+        await newGateActivity.save();
+        console.log('✅ GateActivity document created:', newGateActivity._id);
+      } catch (error) {
+        console.error('❌ Failed to create GateActivity document:', error);
+        // Don't fail the scan if GateActivity creation fails
+      }
+      
       // Mark QR as used and expired
       if (scanType === 'OUT' && request.qrCode.outgoing) {
         request.qrCode.outgoing.isExpired = true;
@@ -1843,58 +1865,117 @@ router.get('/activity/recent', auth, checkRole(['security', 'admin', 'warden']),
   }
 });
 
-// Generate PDF of gate activity and statistics
+// Generate Enhanced PDF of gate activity with block separation and in/out time tracking
 router.get('/activity/pdf', auth, checkRole(['security', 'admin', 'warden', 'gate']), async (req, res) => {
   try {
-    console.log('📄 Generating PDF for gate activity and statistics...');
+    console.log('📄 Generating Enhanced Gate Activity PDF...');
 
-    const today = new Date();
-    const startOfDay = new Date(today.setHours(0, 0, 0, 0));
-    const endOfDay = new Date(today.setHours(23, 59, 59, 999));
+    const { startDate, endDate } = req.query;
+    
+    // Use provided dates or default to today
+    const start = startDate ? new Date(startDate) : new Date();
+    const end = endDate ? new Date(endDate) : new Date();
+    
+    if (!startDate && !endDate) {
+      start.setHours(0, 0, 0, 0);
+      end.setHours(23, 59, 59, 999);
+    } else {
+      start.setHours(0, 0, 0, 0);
+      end.setHours(23, 59, 59, 999);
+    }
 
-    // Get today's gate activity with better error handling
-    const todayActivity = await OutingRequest.find({
-      'gateActivity.scannedAt': {
-        $gte: startOfDay,
-        $lte: endOfDay
-      }
-    })
-    .populate('studentId', 'name rollNumber hostelBlock floor roomNumber phoneNumber')
-    .sort({ 'gateActivity.scannedAt': -1 })
-    .exec();
+    console.log('📅 Date range:', { start, end });
 
-    console.log('🎯 Found requests with gate activity:', todayActivity.length);
+    // Use the GateActivity model for comprehensive tracking
+    const GateActivity = require('../models/GateActivity');
+    
+    // Get all gate activities within the date range
+    const gateActivities = await GateActivity.getActivitiesByDateRange(start, end);
+    
+    console.log('🎯 Found gate activities:', gateActivities.length);
 
-    // Flatten gate activity for easier display (same logic as dashboard)
+    // Enhanced activity log with proper in/out time tracking and request type separation
     const activityLog = [];
-    todayActivity.forEach(request => {
-      if (request.gateActivity && request.gateActivity.length > 0) {
-        request.gateActivity.forEach(activity => {
-          const activityDate = new Date(activity.scannedAt);
-          if (activityDate >= startOfDay && activityDate <= endOfDay) {
-            activityLog.push({
-              id: `${request._id}_${activity._id}`,
-              student: request.studentId,
-              type: activity.type,
-              scannedAt: activity.scannedAt,
-              location: activity.location || 'Main Gate',
-              purpose: request.purpose,
-              remarks: activity.remarks,
-              qrType: activity.qrType
-            });
-          }
-        });
+    const studentTimeTracker = new Map(); // Track in/out times for each student
+
+    // Process gate activities
+    gateActivities.forEach(activity => {
+      const studentId = activity.studentId?._id?.toString();
+      
+      // Track student times
+      if (studentId) {
+        if (!studentTimeTracker.has(studentId)) {
+          studentTimeTracker.set(studentId, { 
+            outTime: null, 
+            inTime: null, 
+            activities: [],
+            student: activity.studentId 
+          });
+        }
+        
+        const tracker = studentTimeTracker.get(studentId);
+        if (activity.type === 'out') {
+          tracker.outTime = activity.scannedAt;
+        } else if (activity.type === 'in') {
+          tracker.inTime = activity.scannedAt;
+        }
+        tracker.activities.push(activity);
       }
+
+      // Determine request type and get purpose
+      let requestType = 'outing';
+      let purpose = 'General Outing';
+      let isEmergency = activity.isEmergency || false;
+      let category = 'regular';
+      let status = 'approved';
+      let approvalFlags = null;
+
+      if (activity.homePermissionRequestId) {
+        requestType = 'home-permission';
+        purpose = activity.homePermissionRequestId?.purpose || 'Home Permission';
+        isEmergency = activity.homePermissionRequestId?.isEmergency || activity.homePermissionRequestId?.category === 'emergency';
+        category = activity.homePermissionRequestId?.category || 'regular';
+        status = activity.homePermissionRequestId?.status || 'approved';
+      } else if (activity.outingRequestId) {
+        requestType = 'outing';
+        purpose = activity.outingRequestId?.purpose || 'General Outing';
+        isEmergency = activity.outingRequestId?.isEmergency || activity.outingRequestId?.category === 'emergency';
+        category = activity.outingRequestId?.category || 'regular';
+        status = activity.outingRequestId?.status || 'approved';
+      }
+
+      activityLog.push({
+        id: activity._id.toString(),
+        student: activity.studentId,
+        type: activity.type.toUpperCase(),
+        scannedAt: activity.scannedAt,
+        location: activity.location || 'Main Gate',
+        purpose: purpose,
+        remarks: activity.securityComment || activity.suspiciousComment || '',
+        qrType: 'QR',
+        requestType: requestType,
+        isEmergency: isEmergency,
+        category: category,
+        status: status,
+        approvalFlags: approvalFlags,
+        isSuspicious: activity.isSuspicious,
+        securityPersonnel: activity.securityPersonnel
+      });
     });
 
     // Sort by scan time (most recent first)
     activityLog.sort((a, b) => new Date(b.scannedAt) - new Date(a.scannedAt));
 
+    // Enhanced statistics calculation
     const stats = {
       studentsOut: 0,
       studentsIn: 0,
       currentlyOut: 0,
-      pendingReturn: 0
+      pendingReturn: 0,
+      totalActivities: activityLog.length,
+      emergencyCount: activityLog.filter(a => a.isEmergency).length,
+      homePermissions: activityLog.filter(a => a.requestType === 'home-permission').length,
+      outings: activityLog.filter(a => a.requestType === 'outing').length
     };
 
     // Calculate current status by looking at the most recent activity for each student
@@ -1922,23 +2003,26 @@ router.get('/activity/pdf', auth, checkRole(['security', 'admin', 'warden', 'gat
 
     stats.pendingReturn = Math.max(0, stats.currentlyOut);
 
+    console.log('📊 Enhanced stats:', stats);
+
     const pdfContent = await generateGateActivityPDF({
       activityLog,
       stats,
-      startDate: startOfDay.toISOString().split('T')[0],
-      endDate: endOfDay.toISOString().split('T')[0],
-      currentUser: req.user.email
+      startDate: start.toISOString().split('T')[0],
+      endDate: end.toISOString().split('T')[0],
+      currentUser: req.user.email,
+      studentTimeTracker
     });
 
     res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', `attachment; filename=gate_activity_${startOfDay.toISOString().split('T')[0]}_to_${endOfDay.toISOString().split('T')[0]}.pdf`);
+    res.setHeader('Content-Disposition', `attachment; filename=gate_activity_${start.toISOString().split('T')[0]}_to_${end.toISOString().split('T')[0]}.pdf`);
     res.send(pdfContent);
 
   } catch (error) {
-    console.error('PDF generation error:', error);
+    console.error('Enhanced PDF generation error:', error);
     res.status(500).json({
       success: false,
-      message: 'Failed to generate PDF',
+      message: 'Failed to generate enhanced PDF',
       error: process.env.NODE_ENV === 'development' ? error.message : undefined
     });
   }

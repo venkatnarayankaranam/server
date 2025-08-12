@@ -824,6 +824,28 @@ outingRequestSchema.methods.scanQR = async function(qrId, scannedBy, location = 
       remarks: `Student ${scanType === 'OUT' ? 'exited' : 'entered'} hostel`
     });
     
+    // ✅ IMPORTANT: Also create a separate GateActivity document for PDF reports
+    const GateActivity = require('./GateActivity');
+    try {
+      const newGateActivity = new GateActivity({
+        studentId: this.studentId,
+        outingRequestId: this._id,
+        type: scanType.toLowerCase(), // 'in' or 'out'
+        scannedAt: new Date(),
+        location: location,
+        qrCode: qrId,
+        securityPersonnel: scannedBy,
+        isEmergency: this.category === 'emergency',
+        createdBy: scannedBy
+      });
+      
+      await newGateActivity.save();
+      console.log('✅ GateActivity document created for outing:', newGateActivity._id);
+    } catch (error) {
+      console.error('❌ Failed to create GateActivity document for outing:', error);
+      // Don't fail the scan if GateActivity creation fails
+    }
+    
     await this.save();
     
     return {
